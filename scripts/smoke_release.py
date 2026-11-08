@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import re
 import subprocess
 import sys
 import time
@@ -42,6 +43,17 @@ def main():
             except urllib.error.HTTPError as error:assert error.code==403
             else:raise RuntimeError('Unauthenticated event endpoint was exposed.')
             print('Native core, authenticated management and fixed AstrBot bridge ready. QQ remains disconnected.')
+        except Exception:
+            log.flush()
+            content=(ROOT/'data/release-smoke.log').read_text(encoding='utf-8',errors='replace')
+            for path in (ROOT/'data').rglob('*'):
+                if path.is_file() and (path.suffix=='.token' or 'password' in path.name):
+                    value=path.read_text(encoding='utf-8',errors='replace').strip()
+                    if value:content=content.replace(value,'[redacted]')
+            for line in content.splitlines()[-100:]:
+                if re.search(r'token|password|authorization|credential|secret|jwt',line,re.I):continue
+                print(line[:400])
+            raise
         finally:
             for child in reversed(children):
                 if child.poll() is None:

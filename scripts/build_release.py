@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import platform
 import shutil
+import sys
 import subprocess
 import zipfile
 
@@ -14,7 +15,7 @@ ROOT=Path(__file__).resolve().parents[1]
 
 def build(target,uv,out):
     subprocess.run(['git','-C',str(ROOT),'diff','--exit-code','HEAD','--'],check=True,stdout=subprocess.DEVNULL)
-    subprocess.run(['python','scripts/check_repository.py','--ref','HEAD'],cwd=ROOT,check=True)
+    subprocess.run([sys.executable,'scripts/check_repository.py','--ref','HEAD'],cwd=ROOT,check=True)
     commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
     source=subprocess.check_output(['git','archive','--format=zip','HEAD'],cwd=ROOT)
     import tomllib
@@ -26,7 +27,7 @@ def build(target,uv,out):
         out.mkdir(parents=True,exist_ok=True);destination=out/(base+'.zip')
         with zipfile.ZipFile(destination,'w',zipfile.ZIP_DEFLATED) as package:
             for info in z.infolist():
-                if info.is_dir() or info.filename.startswith(('.git','.github/','.githooks/')):continue
+                if info.is_dir() or info.filename.startswith(('.git/','.github/','.githooks/')):continue
                 if info.filename.endswith('.command') and target!='macos':continue
                 item=zipfile.ZipInfo(base+'/'+info.filename);item.external_attr=info.external_attr;item.compress_type=zipfile.ZIP_DEFLATED
                 package.writestr(item,z.read(info))

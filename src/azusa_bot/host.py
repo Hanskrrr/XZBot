@@ -83,8 +83,7 @@ def safe_open(path, flags, mode=0o600):
     security.SECURITY_DESCRIPTOR.SetSecurityDescriptorOwner(_win_identity(),False)
     try:
         handle=win32file.CreateFile(str(path),access,win32con.FILE_SHARE_READ|win32con.FILE_SHARE_WRITE|win32con.FILE_SHARE_DELETE,
-            security,creation,0x00200000  # FILE_FLAG_OPEN_REPARSE_POINT
-            ,None)
+            security,creation,0x00200000,None)  # FILE_FLAG_OPEN_REPARSE_POINT
     except pywintypes.error as error:
         code=error.winerror
         if code in (2,3):raise FileNotFoundError(str(path)) from None

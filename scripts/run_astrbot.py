@@ -30,7 +30,7 @@ try:
         port_status = probe.connect_ex(("127.0.0.1", layout.core_port - 1))
 except OSError:
     raise SystemExit(f"无法检查 {layout.core_port - 1} 端口，未连接 QQ。") from None
-if port_status != errno.ECONNREFUSED:
+if port_status not in {errno.ECONNREFUSED, getattr(errno,"WSAECONNREFUSED",10061)}:
     raise SystemExit(f"{layout.core_port - 1} 端口已占用或无法检查，未连接 QQ。")
 
 from astrbot.core.platform.manager import PlatformManager

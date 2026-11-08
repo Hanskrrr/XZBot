@@ -28,7 +28,7 @@ except BlockingIOError:
 for port in (layout.dashboard_port, layout.onebot_port):
     with socket.socket() as check:
         check.settimeout(1)
-        if check.connect_ex(("127.0.0.1",port)) != errno.ECONNREFUSED:
+        if check.connect_ex(("127.0.0.1",port)) not in {errno.ECONNREFUSED, getattr(errno,"WSAECONNREFUSED",10061)}:
             raise SystemExit("普通 QQ 桥接端口已占用或无法检查。")
 private_token = (ROOT / "data/onebot.token").read_text().strip()
 if len(private_token) < 32:
