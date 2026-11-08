@@ -46,7 +46,9 @@ def envelope(payload=None, *, usage=USAGE, finish="stop"):
 
 
 async def call(engine, provider, *, kind="reply"):
-    return await engine._complete_traced(provider, MESSAGES, engine.settings(), kind=kind,
+    from test_context_budget import direct
+    messages = direct(question="synthetic question")[0] if kind == "reply" else MESSAGES
+    return await engine._complete_traced(provider, messages, engine.settings(), kind=kind,
         trigger="automatic" if kind == "summary" else "direct", scope="dm:synthetic", user="synthetic",
         refs=references())
 

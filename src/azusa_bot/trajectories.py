@@ -404,6 +404,7 @@ class TrajectoryStore:
         key = refs.get("delivery_event_key")
         row["delivery_event_key"] = key if isinstance(key,str) and re.fullmatch(r"[a-f0-9]{64}",key) else None
         row["context_budget"] = refs.get("context_budget")
+        row["request_layout"] = refs.get("request_layout")
         row["prompt_revision"] = refs.get("prompt_revision")
         row["begin_dialogs"] = refs.get("begin_dialogs")
         row["execution"] = refs.get("execution")

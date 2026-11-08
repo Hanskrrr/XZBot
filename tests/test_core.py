@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from context_helpers import context as wire_context
 
 from support_content import seed_content
 
@@ -297,7 +298,7 @@ async def test_prompt_does_not_replay_archived_member_records(rig):
     messages = provider.calls[0][0]
     history = [m["content"] for m in messages if m["content"].startswith("historical_record_")]
     assert history == []
-    assert messages[-1]["content"] == "当前问题"
+    assert wire_context(messages)["current_message"]["text"] == "当前问题"
     # Prompt clipping is not deletion; consented storage retains earlier records
     # until its separately configured retention or a user deletion takes effect.
     assert len(engine.memory.recent_history(SCOPE, "u1", limit=100)) == 21

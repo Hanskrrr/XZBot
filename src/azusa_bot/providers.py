@@ -177,6 +177,11 @@ class MockProviders:
         query = messages[-1]["content"]
         if isinstance(query,list):
             query = " ".join(block.get("text","") for block in query if block.get("type")=="text")
+        try:
+            anchor = json.loads(query.split("\n",1)[1]).get("current_message")
+            if isinstance(anchor,dict) and isinstance(anchor.get("text"),str):query=anchor["text"]
+        except (ValueError,IndexError,AttributeError):
+            pass
         result = {"text": "这是离线演练。已按当前群和成员检索记忆；连接云端后会由角色自然回答。你说：" + query[:100],
                 "mode": "text"}
         if '"votes"' in messages[0]["content"]:

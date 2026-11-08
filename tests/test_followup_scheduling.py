@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from context_helpers import context as wire_context
 
 from azusa_bot.bot_control import BotPowerController
 from test_group_followup import rig, event, configure, calls, SCOPE, IDENTITY
@@ -80,10 +81,10 @@ async def test_same_member_burst_merges_to_latest_with_both_parts_in_context(rig
     assert old["mode"]=="none" and fresh["mode"]=="text"
     decisions=calls(provider,"followup")
     assert len(decisions)==1
-    context=json.loads(decisions[0]["messages"][1]["content"].split("\n",1)[1])
-    assert {"first-part","second-part"}<={row["message_id"] for row in context["recent_group_messages"]}
+    context=wire_context(decisions[0]["messages"])
+    assert {"first-part","second-part"}<={row["message_id"] for row in context["recent_conversation"]+[context["current_message"]]}
     last=json.loads(decisions[0]["messages"][-1]["content"].split("\n",1)[1])
-    assert last["latest_text"]=="主要拿来剪视频"
+    assert last["current_message"]["text"]=="主要拿来剪视频"
 
 
 def controlled_wait(monkeypatch,clock):
@@ -122,8 +123,8 @@ async def test_short_paid_interval_waits_and_coalesces_before_another_model_call
     old,fresh=await asyncio.gather(early,latest)
     assert old["mode"]=="none" and fresh["mode"]=="text"
     assert delays==[4.0] and len(calls(provider,"followup"))==2
-    context=json.loads(calls(provider,"followup")[-1]["messages"][1]["content"].split("\n",1)[1])
-    assert {"early","latest"}<={row["message_id"] for row in context["recent_group_messages"]}
+    context=wire_context(calls(provider,"followup")[-1]["messages"])
+    assert {"early","latest"}<={row["message_id"] for row in context["recent_conversation"]+[context["current_message"]]}
 
 
 @pytest.mark.asyncio

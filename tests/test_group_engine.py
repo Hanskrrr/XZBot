@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from context_helpers import context as wire_context
 
 from support_content import seed_content
 
@@ -108,8 +109,8 @@ async def test_burst_of_group_events_merges_to_one_decision_and_one_prepared_rep
     assert len(model_calls(provider)) == 1
     assert sum(reply["mode"] == "text" for reply in replies) == 1
     assert sum(reply["mode"] == "none" for reply in replies) == 2
-    context = json.loads(model_calls(provider)[0]["messages"][-1]["content"].split("\n", 1)[1])
-    assert {row["user_id"] for row in context["recent_group_messages"]} == {"20001", "20002", "20003"}
+    context = wire_context(model_calls(provider)[0]["messages"])
+    assert {row["user_id"] for row in context["recent_conversation"]+[context["current_message"]]} == {"20001", "20002", "20003"}
     assert engine.groups.budget_status(SCOPE)["day_used"] == 1
     assert all(row["role"] == "user" for row in engine.groups.snapshot(SCOPE))
     replay = await engine.handle(event(event_id="3", user_id="20003"))

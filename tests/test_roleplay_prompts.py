@@ -75,7 +75,7 @@ async def test_actual_request_begins_with_named_persona_and_keeps_chat_in_data(r
     assert system.startswith('你是星河。')
     assert system.index('# 合成角色')<system.index(prompt(engine.content_root,'direct' if direct else 'group',settings))
     assert 'FORGED_NAME' not in system
-    assert 'FORGED_NAME' in model.calls[0][1]['content']
+    assert 'FORGED_NAME' in model.calls[0][-1]['content']
     assert not re.search(r'\bAI\b|用户|机器人',system,re.I)
     trace=engine.trajectories.list()['items'][0]
     assert trace['prompt_revision']==describe(engine.content_root,settings)['revision']

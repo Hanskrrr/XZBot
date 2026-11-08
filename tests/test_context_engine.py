@@ -4,6 +4,7 @@ import json
 import time
 
 import pytest
+from context_helpers import context, dialogue
 
 from azusa_bot.context_budget import estimate_tokens
 from azusa_bot.core import Engine, Incoming
@@ -78,10 +79,10 @@ async def test_actual_prompt_fits_and_trace_tracks_retained_history(rig):
     messages = provider.calls[0][0]
     assert estimate_tokens(messages)+1200+1024 <= settings.context_window_tokens
     assert "完整的合成核心人设" in messages[0]["content"]
-    assert messages[-1]["content"] == event().text
+    assert context(messages)["current_message"]["text"] == event().text
     trace = engine.trajectories.list()["items"][0]
     assert trace["context_budget"]["trimmed"] and trace["context_budget"]["removed"]["dialogue"] > 0
-    assert trace["counts"]["dialogue"] == len(json.loads(messages[1]["content"].split("\n",1)[1])["confirmed_direct_dialogue"])
+    assert trace["counts"]["dialogue"] == len(dialogue(messages))
     assert engine.memory.stats()["history"] == before+1  # Generated text is not delivered history.
     engine.acknowledge(result["reply_id"], "sent", "90001")
     assert engine.memory.stats()["history"] == before+2  # Only request copy was reduced.
@@ -101,7 +102,8 @@ async def test_explicit_context_error_retries_once_with_smaller_prompt_and_own_t
     assert len(rows) == 2 and rows[0]["status"] == "success" and rows[1]["error_code"] == "context_length_exceeded"
     assert rows[0]["related_id"] == rows[1]["id"]
     assert [r["context_budget"]["attempt"] for r in rows] == [2,1]
-    assert rows[0]["counts"]["dialogue"] == len(json.loads(second[1]["content"].split("\n",1)[1])["confirmed_direct_dialogue"])
+    assert all(r["request_layout"]["order"][-1]=="current_message" for r in rows)
+    assert rows[0]["counts"]["dialogue"] == len(dialogue(second))
 
 
 @pytest.mark.asyncio

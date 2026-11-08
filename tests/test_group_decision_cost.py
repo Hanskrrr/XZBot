@@ -8,6 +8,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from context_helpers import context as wire_context
 
 from azusa_bot.core import Engine, Incoming
 from azusa_bot.settings import Settings, private_write, write_settings
@@ -98,8 +99,8 @@ async def test_superseded_call_keeps_30_second_gap_without_automatic_retry(rig):
     assert len(provider.calls) == 2
     with engine.ledger.db() as db:
         assert db.execute("SELECT SUM(used) FROM budget").fetchone()[0] == 2
-    context = json.loads(provider.calls[-1][1]["content"].split("\n", 1)[1])
-    assert [row["message_id"] for row in context["recent_group_messages"]] == ["1", "2", "3", "4"]
+    context = wire_context(provider.calls[-1])
+    assert [row["message_id"] for row in context["recent_conversation"]+[context["current_message"]]] == ["1", "2", "3", "4"]
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@ import asyncio
 import json
 
 import pytest
+from context_helpers import context as wire_context
 
 from azusa_bot.group_addressing import address_names, is_addressed
 from azusa_bot.settings import write_settings
@@ -73,9 +74,9 @@ async def test_short_interval_waits_and_same_member_plain_continuation_takes_ove
     old, fresh = await asyncio.gather(first, latest)
     assert old["mode"] == "none" and fresh["mode"] == "text"
     assert delays == [4.0] and len(provider.calls) == 2
-    payload = json.loads(provider.calls[-1][1]["content"].split("\n", 1)[1])
-    assert payload["addressed_candidate"]["message_id"] == "3"
-    assert {"2", "3"} <= {row["message_id"] for row in payload["recent_group_messages"]}
+    payload = wire_context(provider.calls[-1])
+    assert payload["current_message"]["message_id"] == "3"
+    assert {"2", "3"} <= {row["message_id"] for row in payload["recent_conversation"]+[payload["current_message"]]}
     assert engine._named_candidates == {}
 
 

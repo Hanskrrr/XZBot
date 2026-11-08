@@ -23,7 +23,7 @@ def test_prompt_overrides_are_profile_scoped_and_conflict_checked(tmp_path):
     with pytest.raises(PromptConflict):save(a,{'style':'旧页面'},data['revision'])
     save(a,{'style':None},describe(a,settings)['revision'])
     assert prompt(a,'style')==DEFAULTS['style']
-    assert len(describe(a,settings)['blocks'])==33
+    assert len(describe(a,settings)['blocks'])==len(DEFAULTS)
 
 
 @pytest.mark.parametrize('changes',[{'unknown':'x'},{'style':12},{'style':'${unknown}'},{'group_header':'一行\n另一行'},{'style':'a'*12001}])

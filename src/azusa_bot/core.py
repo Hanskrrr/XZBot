@@ -19,7 +19,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 
-from . import lore, assets, web_search, group_topic, participation_vote, conversation_config, segmented_delivery
+from . import lore, assets, web_search, group_topic, participation_vote, conversation_config, segmented_delivery, request_context
 from .memory import MemoryStore
 from .group_chat import GroupConversation
 from .dialogue import RecentDialogue, refers_back, requests_repeat
@@ -452,7 +452,9 @@ class Engine:
             vote_prompt=prompt(self.content_root,"participation_vote",settings)
             if vote_prompt not in messages[0]["content"]:
                 messages[0]["content"] += "\n"+vote_prompt
-        refs["prompt_prefixes"]={key:prompt(self.content_root,key,settings) for key in ("direct_header","group_header","followup_header")}
+        refs["prompt_prefixes"]={key:prompt(self.content_root,key,settings) for key in ("direct_header","group_header","followup_header","recent_header","current_header")}
+        prefixes = dict(refs["prompt_prefixes"])
+        render_request = lambda rows: request_context.render(rows,kind=kind,prefixes=prefixes)
         refs["prompt_revision"]=prompt_revision(prompt_overrides(self.content_root),character=character_name(self.content_root))
         visual_events = retained_events(messages,refs,kind,image_event_id,history_events)
         if settings.vision_enabled and visual_events:
@@ -467,7 +469,8 @@ class Engine:
         image_tokens = len(candidates)*per_image_tokens + len(failed_metadata)*1024 + (len(candidates)+len(failed_metadata))*label_tokens
         # The database retains original evidence. Only this request is reduced.
         prepared = fit_context(messages, refs, kind=kind, window_tokens=settings.context_window_tokens,
-                               output_tokens=700 if kind == "summary" else 1200,image_tokens=image_tokens,example_tokens=example_tokens)
+                               output_tokens=700 if kind == "summary" else 1200,image_tokens=image_tokens,example_tokens=example_tokens,
+                               render_messages=render_request)
         number = trace_id
         parent = related_id
         for attempt in (1, 2):
@@ -499,6 +502,13 @@ class Engine:
             metadata = [dict(row, **sources.get(row["event_id"],{})) for row in metadata]
             current_refs["images"] = trace_references(images=metadata)["images"]
             current_refs["context_budget"] = dict(prepared["metrics"], attempt=attempt)
+            ordered_messages = render_request(prepared["messages"])
+            current_refs["request_layout"] = request_context.layout(ordered_messages,kind=kind)
+            if current_refs["request_layout"]:
+                order=current_refs["request_layout"]["order"]
+                if example_messages:order.insert(1,"examples")
+                if any(row.get("relation")!="current" for row in metadata):
+                    order.insert(len(order)-1,"earlier_images")
             refs.clear(); refs.update(copy.deepcopy(current_refs))
             if number is None:
                 number = self._trace_start(settings,kind,trigger,scope,user,current_refs,related_id=parent,
@@ -534,7 +544,7 @@ class Engine:
                     execution.consume()
                 provider = provider if provider is not None else self.providers(settings)
                 self.trajectories.called(number)
-                request_messages = attach_images(prepared["messages"],selected,current_refs["images"],current_event=image_event_id,labels={key:prompt(self.content_root,key,settings) for key in ("earlier_image","image_label")})
+                request_messages = attach_images(ordered_messages,selected,current_refs["images"],current_event=image_event_id,labels={key:prompt(self.content_root,key,settings) for key in ("earlier_image","image_label")})
                 # Examples go before actual context only at the transport boundary.
                 # Budgeting, image association and retrieval keep their typed layout.
                 if example_messages:
@@ -585,7 +595,8 @@ class Engine:
                     # or incomplete output. A second attempt gets its own trace.
                     smaller = fit_context(prepared["messages"],prepared["refs"],kind=kind,
                         window_tokens=max(4096,settings.context_window_tokens//2),
-                        output_tokens=700 if kind == "summary" else 1200,image_tokens=image_tokens,example_tokens=example_tokens)
+                        output_tokens=700 if kind == "summary" else 1200,image_tokens=image_tokens,example_tokens=example_tokens,
+                        render_messages=render_request)
                     if (not smaller["blocked"] and
                             smaller["metrics"]["estimated_after"] < prepared["metrics"]["estimated_after"]):
                         prepared, parent, number = smaller, number, None

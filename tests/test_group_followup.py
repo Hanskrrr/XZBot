@@ -51,7 +51,7 @@ class Provider:
             # in every request. Classify the actual structured input envelope.
             data=json.loads(messages[1]['content'].split('\n',1)[1])
             kind=('direct' if 'trusted_identity' in data else
-                  'followup' if len(messages)==3 and 'current_speaker' in json.loads(messages[2]['content'].split('\n',1)[1]) else
+                  'followup' if data.get('continuation_candidate') else
                   'passive')
         self.calls.append({"kind": kind, "messages": messages})
         if self.entered and kind == self.block_kind:

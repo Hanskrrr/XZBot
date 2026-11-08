@@ -7,6 +7,7 @@ import time
 import httpx
 from PIL import Image
 import pytest
+from context_helpers import context
 
 from azusa_bot.prompts import DEFAULTS
 from azusa_bot.core import Engine, Incoming
@@ -81,7 +82,7 @@ async def test_group_picture_freshness_and_current_text_anchor(rig,window,quote,
     assert ('OLD_IMAGE_CAPTION' in serialized) is (age < window*60)
     envelopes=[m["content"] for m in messages if isinstance(m["content"],str) and
                m["content"].startswith((DEFAULTS["direct_header"],DEFAULTS["group_header"]))]
-    data=json.loads(envelopes[0].split("\n",1)[1])
+    data=context(messages)
     assert data["current_message"]["message_id"]=="2"
     assert data["current_message"]["has_images"] is False
     assert data["current_message"]["image_count"]==0
@@ -159,8 +160,9 @@ async def test_group_image_download_is_in_timeline_before_following_text(rig):
     assert provider.calls==[]
     release.set();await pending;reply=await follow
     assert reply["mode"]=="text" and len(images(provider.calls[-1]))==1
-    data=json.loads(provider.calls[-1][1]["content"].split("\n",1)[1])
-    assert [row["message_id"] for row in data["recent_group_messages"]]==["1","2"]
+    data=context(provider.calls[-1])
+    assert [row["message_id"] for row in data["recent_conversation"]]==["1"]
+    assert data["current_message"]["message_id"]=="2"
 
 
 @pytest.mark.asyncio

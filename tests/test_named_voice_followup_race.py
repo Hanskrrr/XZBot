@@ -4,6 +4,7 @@ from pathlib import Path
 import time
 
 import pytest
+from context_helpers import dialogue
 
 from test_group_voice import SCOPE, event, rig, traces
 
@@ -60,6 +61,6 @@ async def test_explicit_repeat_preserves_actual_voice_turn_and_allows_same_speec
     result=await engine.handle(event('再来一次',event_id='repeat'))
     assert result['mode']=='voice' and provider.speech==[first['text'],first['text']]
     data=json.loads(provider.calls[-1][1]['content'].split('\n',1)[1])
-    rows=data['confirmed_direct_dialogue']
+    rows=dialogue(provider.calls[-1])
     assert rows[0]['text']=='阿梓，发语音说声晚安'
     assert rows[-1]['text']==first['text'] and rows[-1]['mode']=='voice'

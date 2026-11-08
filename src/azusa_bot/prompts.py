@@ -17,6 +17,7 @@ DEFAULTS = {key:row['text'] for key,row in CATALOG.items()}
 LOCK = threading.RLock()
 VARIABLES = {'character_name','max_reply_chars','max_voice_chars','idle_minutes','voice_availability'}
 SCENES = {
+    '实际输入排列':['persona','examples','direct_header','recent_header','current_header'],
     '直接回复':['persona_header','persona','direct','knowledge','expression','vision','output','style','dialogue','persona_footer','topic_use','role_activity','search','knowledge_lookup','history_lookup','examples'],
     '群聊接话':['persona_header','persona','group','knowledge','expression','vision','output','style','dialogue','heat','addressed','persona_footer','topic_use','role_activity','search','knowledge_lookup','history_lookup','examples','participation_vote'],
     '连续对话':['persona_header','persona','group','knowledge','expression','vision','output','style','dialogue','persona_footer','followup','topic_use','role_activity','search','knowledge_lookup','history_lookup','examples','participation_vote'],
@@ -53,7 +54,7 @@ def _validate(values):
             raise ValueError('prompt_variable_invalid')
         # Prefixes are parsed at fixed application-authored positions. A final
         # newline preserves the JSON boundary even for an empty editable label.
-        if key in {'direct_header','group_header','followup_header'} and (len(value)>300 or '\n' in value.rstrip('\n')):
+        if key in {'direct_header','group_header','followup_header','recent_header','current_header'} and (len(value)>300 or '\n' in value.rstrip('\n')):
             raise ValueError('prompt_header_single_line')
     return values
 
@@ -108,7 +109,7 @@ def prompt(root,key,settings=None):
                 'idle_minutes':settings.group_idle_minutes,
                 'voice_availability':'可用' if settings.voice_enabled and settings.voice_authorized else '不可用，必须使用文字或允许的图片'}
         value=re.sub(r'\$\{([^}]+)\}',lambda m:str(params[m[1]]),value)
-    return value.rstrip('\n')+'\n' if key in {'direct_header','group_header','followup_header'} else value
+    return value.rstrip('\n')+'\n' if key in {'direct_header','group_header','followup_header','recent_header','current_header'} else value
 
 
 def with_persona(root, persona, policy, settings):

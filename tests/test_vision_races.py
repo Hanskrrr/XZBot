@@ -6,6 +6,7 @@ import json
 import httpx
 from PIL import Image
 import pytest
+from context_helpers import context as wire_context
 
 from azusa_bot.prompts import DEFAULTS
 from azusa_bot.core import Engine, Incoming
@@ -83,9 +84,9 @@ async def test_named_reply_survives_new_ordinary_message_without_losing_target(r
     assert first_result["mode"] == "text"
     assert second_result["reason"] == "decision_cooldown"
     assert len(provider.calls) == 1
-    context = json.loads(provider.calls[0][1]["content"].split("\n", 1)[1])
-    assert context["addressed_candidate"]["user_id"] == "20001"
-    assert context["addressed_candidate"]["message_id"] == "1"
+    context = wire_context(provider.calls[0])
+    assert context["current_message"]["user_id"] == "20001"
+    assert context["current_message"]["message_id"] == "1"
 
 
 @pytest.mark.asyncio
@@ -154,7 +155,7 @@ async def test_same_group_other_member_can_reference_picture_with_original_sende
     assert first["reason"] == "collecting_context" and provider.calls == []
     second = await engine.handle(event(event_id="2", user_id="20002", text="你看看刚刚那张图", mentioned=True))
     assert second["mode"] == "text" and len(image_parts(provider.calls[0])) == 1
-    context = json.loads(provider.calls[0][1]["content"].split("\n", 1)[1])
+    context = wire_context(provider.calls[0])
     assert context["trusted_identity"]["user_id"] == "20002"
     labels = [part["text"] for message in provider.calls[0] if isinstance(message["content"], list)
               for part in message["content"] if part["type"] == "text" and part["text"].startswith(DEFAULTS["image_label"])]

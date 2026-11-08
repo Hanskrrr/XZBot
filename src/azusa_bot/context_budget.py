@@ -293,7 +293,7 @@ class _Context:
 
 
 def fit_context(messages, refs, *, kind, window_tokens=32768, output_tokens=1200,
-                safety_tokens=1024, image_tokens=0, example_tokens=0):
+                safety_tokens=1024, image_tokens=0, example_tokens=0, render_messages=None):
     """Fit a copy of a known request, returning exact retained refs and counts.
 
     Callers must check ``blocked`` before calling a provider. For summary calls,
@@ -310,7 +310,11 @@ def fit_context(messages, refs, *, kind, window_tokens=32768, output_tokens=1200
            (window_tokens, output_tokens, safety_tokens, image_tokens, example_tokens)) or image_tokens > 1000000 or not isinstance(refs, dict):
         raise ValueError("context_budget_invalid")
     fitted, fitted_refs = deepcopy(messages), deepcopy(refs)
-    before = estimate_tokens(fitted)
+    # Account for the actual provider text, including split headers and
+    # deduplicated dialogue, on every reduction and retry. Internal positions
+    # remain stable for exact source removal and tool-result insertion.
+    measure = (lambda rows: estimate_tokens(render_messages(rows))) if render_messages else estimate_tokens
+    before = measure(fitted)
     total_budget = max(0, window_tokens - output_tokens - safety_tokens)
     budget = max(0, total_budget - image_tokens - example_tokens)
     removed = {key: 0 for key in REMOVED_KEYS}
@@ -323,7 +327,7 @@ def fit_context(messages, refs, *, kind, window_tokens=32768, output_tokens=1200
         if context is not None:
             if context.summary is not None:
                 removed["history"] = context.trim_summary(budget)
-                after = estimate_tokens(fitted)
+                after = measure(fitted)
             else:
                 # Large fixed documents may already make success impossible.
                 # Keep the same fully reduced request/refs, but avoid encoding
@@ -337,10 +341,10 @@ def fit_context(messages, refs, *, kind, window_tokens=32768, output_tokens=1200
                         removed[category] += count
                         if not fixed_over_budget:
                             context.render()
-                            after = estimate_tokens(fitted)
+                            after = measure(fitted)
                 if fixed_over_budget and any(removed.values()):
                     context.render()
-                    after = estimate_tokens(fitted)
+                    after = measure(fitted)
     blocked = after > budget or image_tokens + example_tokens > total_budget
     metrics = {"window_tokens": window_tokens, "input_budget": budget,
                "output_tokens": output_tokens, "safety_tokens": safety_tokens,

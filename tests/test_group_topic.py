@@ -3,6 +3,7 @@ import asyncio
 import json
 import math
 import pytest
+from context_helpers import context as wire_context
 from azusa_bot import group_topic, lore
 from azusa_bot.core import Ledger
 from azusa_bot.providers import ProviderError
@@ -18,7 +19,7 @@ class TopicModel:
         self.failure=False;self.entered=None;self.release=None
     async def complete(self,messages,**kw):
         self.calls.append(messages)
-        data=json.loads(messages[1]['content'].split('\n',1)[1])
+        data=wire_context(messages)
         anchor=data['current_message']
         if 'text' not in anchor:
             if self.entered:self.entered.set()
@@ -130,7 +131,7 @@ async def test_final_context_trimming_drops_topic_when_evidence_is_removed(rig):
     original=engine._complete_traced_once
     async def wrapped(provider,messages,settings,**kwargs):
         if kwargs['kind']=='group_decision':
-            refs=kwargs['refs'];data=json.loads(messages[1]['content'].split('\n',1)[1])
+            refs=kwargs['refs'];data=wire_context(messages)
             assert 'group_topic' in data
             # An expensive old row forces pruning, including the cited row.
             data['recent_group_messages'][0]['text']='x'*5000
@@ -186,7 +187,7 @@ async def test_heat_forces_fresh_topic_despite_normal_switch_and_interval(rig):
         assert reply['mode']=='text'
         clock.advance(21)
     assert len(model.calls)==4
-    assert sum('text' not in json.loads(c[1]['content'].split('\n',1)[1])['current_message'] for c in model.calls)==2
+    assert sum('text' not in wire_context(c)['current_message'] for c in model.calls)==2
     assert all(r['group_topic']['required_for_heat'] for r in engine.trajectories.list()['items'])
 
 

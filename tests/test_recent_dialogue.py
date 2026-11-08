@@ -1,6 +1,7 @@
 """Receipt-confirmed short context, independent of long-term memory and turn caps."""
 import json
 import pytest
+from context_helpers import dialogue
 
 from azusa_bot.dialogue import RecentDialogue, refers_back, requests_repeat
 from azusa_bot.prompts import DEFAULTS, SCENES, describe, save
@@ -27,7 +28,7 @@ async def test_private_context_does_not_require_memory_consent_but_requires_rece
     clock.advance(6)
     second=await engine.handle(dm('再来一次','p2'))
     assert second['mode']=='text'
-    rows=context(provider).get('confirmed_direct_dialogue',[])
+    rows=dialogue(provider.calls[-1]['messages'])
     assert [r['text'] for r in rows]==(['给我说一句晚安',provider.direct_reply['text']] if receipt=='sent' else [])
     assert engine.memory.stats()['history']==0
     if rows:
@@ -43,7 +44,7 @@ async def test_repeated_direct_mentions_keep_whole_turns_even_with_followup_disa
         clock.advance(6)
         result=await engine.handle(event(text,mentioned=True,event_id=f'd{i}'))
         assert result['mode']=='text'
-        assert len(context(provider).get('confirmed_direct_dialogue',[]))==2*i
+        assert len(dialogue(provider.calls[-1]['messages']))==2*i
         engine.acknowledge(result['reply_id'],'sent',f'90{i}')
     assert IDENTITY not in engine._group_threads
 
@@ -60,7 +61,7 @@ async def test_explicit_repeat_reopens_recent_context_and_can_repeat_identical_a
     result=await engine.handle(event('再来一次',event_id='repeat'))
     assert result['mode']=='text' and result['text']==provider.direct_reply['text']
     assert calls(provider,'followup')
-    assert [r['message_id'] for r in context(provider)['confirmed_direct_dialogue']]==['start','90001']
+    assert [r['message_id'] for r in dialogue(provider.calls[-1]['messages'])]==['start','90001']
 
 
 @pytest.mark.asyncio
