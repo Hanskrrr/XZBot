@@ -201,8 +201,17 @@ class AzusaOneBot(Star):
                 if not isinstance(receipt,dict):
                     raise ValueError('Missing idle receipt')
                 ack.update(status='sent',message_id=message_id(receipt.get('message_id')))
-            except Exception:
-                logger.warning('XZBot idle participation send needs local review')
+            except Exception as error:
+                # Keep only fixed categories/numeric API codes, never upstream
+                # wording (which can contain IDs, chat text or credentials).
+                result=getattr(error,'result',{})
+                retcode=result.get('retcode') if isinstance(result,dict) else None
+                details=str(result.get('message',''))+str(result.get('wording','')) if isinstance(result,dict) else ''
+                code=('session_invalid' if '1006514' in details else
+                      'send_timeout' if isinstance(error,TimeoutError) or 'timeout' in details.lower() else
+                      'onebot_retcode_'+str(retcode) if type(retcode) is int and abs(retcode)<2**31 else
+                      'api_unavailable' if type(error).__name__=='ApiNotAvailable' else 'bridge_error')
+                logger.warning('XZBot idle participation send needs local review: %s',code)
             finally:
                 try:
                     result=await self.client.post(base+'/bridge/idle/ack',headers=headers,json=ack,timeout=10)

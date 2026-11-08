@@ -62,13 +62,14 @@ async def test_manual_revocation_after_generation_and_failed_send_not_retried(ri
     assert len(p.calls)==1
 
 
-def test_api_auth_offline_idempotency_and_status(rig,monkeypatch):
+@pytest.mark.parametrize('connection_state',['online','degraded'])
+def test_api_auth_offline_idempotency_and_status(rig,monkeypatch,connection_state):
     e,s,_,_=rig;app=create_app(e.root)
     c=TestClient(app);headers={'Authorization':'Bearer '+token(e.root,'admin')}
     body={'scope':SCOPE,'request_id':'c'*32}
     assert c.post('/admin/groups/idle/trigger',json=body).status_code==401
     assert c.post('/admin/groups/idle/trigger',headers=headers,json=body).status_code==409
-    monkeypatch.setattr(app.state.qq_connection,'snapshot',lambda:{'online':True})
+    monkeypatch.setattr(app.state.qq_connection,'snapshot',lambda:{'online':connection_state=='online','state':connection_state})
     r=c.post('/admin/groups/idle/trigger',headers=headers,json=body);assert r.status_code==200,r.text
     assert c.post('/admin/groups/idle/trigger',headers=headers,json=body).json()==r.json()
     assert c.get('/admin/groups/idle/requests/'+'c'*32,headers=headers).json()['status']=='queued'

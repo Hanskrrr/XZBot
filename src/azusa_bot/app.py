@@ -725,7 +725,9 @@ def create_app(root: Path | None = None) -> FastAPI:
         if (set(body) != {"scope", "request_id"} or not isinstance(body.get("scope"), str)
                 or not re.fullmatch(r"[a-f0-9]{32}", str(body.get("request_id", "")))):
             raise HTTPException(400, "invalid_idle_request")
-        if qq_connection.snapshot()["online"] is not True:
+        # Unconfirmed prior sends are a warning, not proof of logout. A fresh
+        # explicit admin action may try once; this never replays the old draft.
+        if qq_connection.snapshot()["state"] not in {"online","degraded"}:
             raise HTTPException(409, "manual_idle_offline")
         try:
             return engine.idle.queue_manual(body["scope"], body["request_id"])
