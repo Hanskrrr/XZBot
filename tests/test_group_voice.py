@@ -145,6 +145,19 @@ async def test_tts_failure_returns_one_actual_text_without_placeholder(rig):
     assert len(traces(engine, "tts")) == 1 and traces(engine, "tts")[0]["status"] == "failed"
 
 
+@pytest.mark.parametrize('sources',[False,True])
+async def test_searched_answer_can_choose_voice_unless_links_are_requested(rig,sources):
+    engine,provider,settings=rig
+    text='查到的事情就这么简单。'
+    answer={'mode':'voice','text':text,'citations':[1],
+            '_web_evidence':{'results':[{'id':1,'title':'合成来源','url':'https://example.org/source'}]}}
+    result=await engine._render_reply(event('给我来源' if sources else '查完说一句'),SCOPE,settings,answer,text,{},
+        trigger='direct',context_generation=engine.generation(SCOPE))
+    assert result['mode']==('text' if sources else 'voice')
+    assert provider.speech==([] if sources else [text])
+    if sources:assert 'https://example.org/source' in result['text']
+
+
 @pytest.mark.asyncio
 async def test_model_can_reply_when_no_cloud_quota_remains_for_speech(rig):
     engine, provider, settings = rig

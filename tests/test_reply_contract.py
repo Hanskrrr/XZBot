@@ -22,7 +22,7 @@ def test_required_fields_match_route_and_enabled_features(kind,voting):
     assert ('votes' in required)==(voting and kind!='reply')
     assert ('continuation' in required)==(kind=='followup')
     assert ('confidence' in required)==(not voting and kind!='reply')
-    assert ('voice' in value['properties']['mode']['enum'])==(kind!='group_idle')
+    assert 'voice' in value['properties']['mode']['enum']
     assert ('web_search' in value['properties'])==(kind!='group_idle')
     assert 'threshold' not in str(value) and 'weight' not in str(value)
 

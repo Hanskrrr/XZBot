@@ -1455,7 +1455,7 @@ class Engine:
         if not current():
             return quiet()
         if answer.get("_web_evidence"):
-            return {"mode":"text","text":web_search.cite(dict(answer,text=response),answer["_web_evidence"],show=settings.web_search_show_sources or web_search.wants_sources(event.text))["text"]}
+            response=web_search.cite(dict(answer,text=response),answer["_web_evidence"],show=settings.web_search_show_sources or web_search.wants_sources(event.text))["text"]
         mode=mode_override or answer.get("mode","text")
         result=({"mode":"text","text":response} if mode_override else
                 self._expression_reply(answer,response,trace_data.get("assets",[])))

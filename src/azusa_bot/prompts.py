@@ -29,8 +29,8 @@ SCENES = {
     '预设问答':['examples'],
     '高置信度话题供回答参考':['topic_use'],
     '记忆整理':['summary'],
-    '手动发起群聊':['persona_header','persona','manual_idle','knowledge','style','persona_footer','role_activity','examples'],
-    '冷场发言':['persona_header','persona','idle','knowledge','style','persona_footer','role_activity','examples','participation_vote'],
+    '手动发起群聊':['persona_header','persona','manual_idle','knowledge','style','output','persona_footer','role_activity','examples'],
+    '冷场发言':['persona_header','persona','idle','knowledge','style','output','persona_footer','role_activity','examples','participation_vote'],
 }
 
 class PromptConflict(ValueError): pass

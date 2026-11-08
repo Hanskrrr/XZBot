@@ -70,6 +70,7 @@ class IdleConversation:
         for number, item in list(self.pending.items()):
             if now-item['at'] >= 240:
                 self.pending.pop(number, None)
+                self.engine.discard_generated_media(item)
                 db.execute("UPDATE group_idle_attempts SET status='expired' WHERE id=?", (number,))
 
     def invalidate(self, scope=None):
@@ -87,6 +88,7 @@ class IdleConversation:
         for number, item in list(self.pending.items()):
             if scope is None or item['scope'] == scope:
                 self.pending.pop(number, None)
+                self.engine.discard_generated_media(item)
 
     def observe(self, event, scope):
         settings = self.engine.settings(scope)
@@ -123,7 +125,9 @@ class IdleConversation:
                 self._finish(number, 'cancelled')
 
     def _finish(self, number, status):
-        self.pending.pop(number, None)
+        item = self.pending.pop(number, None)
+        if item:
+            self.engine.discard_generated_media(item)
         self.manual_requests.pop(number, None)
         with self.engine.ledger.db() as db:
             db.execute('UPDATE group_idle_attempts SET status=? WHERE id=?', (status, number))
@@ -209,7 +213,7 @@ class IdleConversation:
                 if not manual and not engine.groups.budget_status(candidate['scope'], **engine._group_budget(settings))['allowed']:
                     self._finish(number, 'budget'); return []
                 context = engine._group_snapshot(candidate['scope'], settings)
-                from .core import clean_reply
+                from .core import clean_reply, Incoming
                 persona = (engine.content_root/'content/persona.md').read_text()
                 knowledge = lore.for_prompt(engine.content_root, '轻松日常闲聊')
                 refs = trace_references(knowledge=knowledge, persona=persona, group_context=context)
@@ -219,7 +223,7 @@ class IdleConversation:
                 settings=settings.model_copy(update={"group_chat_confidence_threshold":confidence_policy["effective"]})
                 refs['_text_preview_allowed'] = engine._preview_context_allowed(candidate['scope'], context)
                 policy = with_persona(engine.content_root,persona,'\n'.join(prompt(engine.content_root,key,settings)
-                    for key in ('manual_idle' if manual else 'idle','knowledge','style')),settings)
+                    for key in ('manual_idle' if manual else 'idle','knowledge','style','output')),settings)
                 messages = [{'role':'system','content':policy}, {'role':'user','content':prompt(engine.content_root,"group_header",settings)+json.dumps(
                     {'recent_group_messages':context, 'lore':knowledge, 'available_expressions':[],
                      'latest_speaker_id':self_id, 'latest_speaker_own_memories':[]}, ensure_ascii=False)}]
@@ -240,11 +244,24 @@ class IdleConversation:
                 reservation = None if manual else engine.groups.reserve(candidate['scope'], **engine._group_budget(settings))
                 if not manual and not reservation:
                     self._finish(number, 'budget'); return []
-                candidate.update(text=text, reservation=reservation, status='prepared')
+                # Share the ordinary reply's Profile voice policy, quota, TTS
+                # trace, cancellation checks and pre-send text fallback.
+                event = Incoming(transport='onebot', app_id=self_id, kind='group',
+                    scope_id=candidate['target_id'], user_id=self_id,
+                    event_id='idle-'+number, text='')
+                result = await engine._render_reply(event, candidate['scope'], settings,
+                    {**answer, 'mode':'voice' if answer.get('mode')=='voice' else 'text'}, text, refs,
+                    trigger='manual' if manual else 'background',
+                    context_generation=candidate['generation'], valid=lambda:self._valid(candidate))
+                if not self._valid(candidate) or result['mode']=='none':
+                    engine.discard_generated_media(result)
+                    self._finish(number, 'cancelled'); return []
+                candidate.update(result, reservation=reservation, status='prepared')
                 self.pending[number] = candidate
                 with engine.ledger.db() as db:
                     db.execute("UPDATE group_idle_attempts SET status='prepared' WHERE id=?", (number,))
-                return [{**{key:candidate[key] for key in ('id','claim_token','self_id','target_id','text')}, 'manual':manual}]
+                return [{**{key:candidate[key] for key in ('id','claim_token','self_id','target_id','text','mode')},
+                         **({'media_path':candidate['media_path']} if candidate.get('media_path') else {}), 'manual':manual}]
         except asyncio.CancelledError:
             self._finish(number, 'interrupted')
             raise

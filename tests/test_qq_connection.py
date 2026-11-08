@@ -1,6 +1,7 @@
 """No QQ/network: stale sessions and transports must never become green online."""
 import asyncio
 import json
+import sqlite3
 
 import pytest
 from fastapi.testclient import TestClient
@@ -122,3 +123,31 @@ async def test_login_failure_category_survives_recovery_and_restart(monitor):
     restored=QQConnection(m.root,clock=lambda:clock[0],monotonic=lambda:clock[0])
     assert any(r.get('login_error_code')=='session_expired' for r in restored.events)
     assert any('登录态失效' in r['message'] for r in restored.snapshot()['events'])
+
+
+async def test_receipt_failures_override_online_without_mistaking_quiet_for_logout(monitor):
+    m,clock,_,_=monitor;m.report('10001',True,True)
+    assert (await m.check())['state']=='online'
+    path=m.root/'data/state.sqlite3'
+    with sqlite3.connect(path) as db:
+        db.executescript('CREATE TABLE deliveries(scope TEXT,status TEXT,at REAL); CREATE TABLE group_idle_attempts(scope TEXT,status TEXT,at REAL);')
+        db.executemany('INSERT INTO deliveries VALUES (?,?,?)',[
+            ('onebot:10001:dm:20001','demo',999),
+            ('onebot:99999:dm:20001','uncertain',999)])
+        db.executemany('INSERT INTO group_idle_attempts VALUES (?,?,?)',[
+            ('onebot:10001:group:30001','uncertain',998),
+            ('onebot:10001:group:30001','uncertain',999)])
+    clock[0]+=6;m.report('10001',True,True)
+    result=await m.check()
+    assert result['state']=='degraded' and result['online'] is False
+    assert result['traffic']['consecutive_unconfirmed']==2
+    assert result['traffic']['last_received_at'] is None
+    # A later heartbeat or actual incoming message does not prove outgoing works.
+    with sqlite3.connect(path) as db:db.execute('INSERT INTO deliveries VALUES (?,?,?)',('onebot:10001:dm:20001','observed',1005))
+    clock[0]+=6;m.report('10001',True,True)
+    assert (await m.check())['state']=='degraded'
+    with sqlite3.connect(path) as db:db.execute('INSERT INTO deliveries VALUES (?,?,?)',('onebot:10001:dm:20001','sent',1011))
+    clock[0]+=6;m.report('10001',True,True)
+    result=await m.check()
+    assert result['state']=='online' and result['traffic']['consecutive_unconfirmed']==0
+    assert result['traffic']['last_successful_request_at']==1011

@@ -13,7 +13,7 @@ def build(settings, kind, *, tools=()):
         return None
     score = {'type':'number', 'minimum':0, 'maximum':1}
     modes = ['text'] if kind in {'group_idle','group_idle_manual'} else ['text', 'image']
-    if kind not in {'group_idle','group_idle_manual'} and settings.voice_enabled and settings.voice_authorized:
+    if settings.voice_enabled and settings.voice_authorized:
         modes.append('voice')
     properties = {'text':{'type':'string'}, 'mode':{'enum':modes}}
     required = ['text', 'mode']

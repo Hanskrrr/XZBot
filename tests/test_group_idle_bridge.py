@@ -1,4 +1,4 @@
-"""The idle transport is text-only, online-only, authorized and single-send."""
+"""Idle text/voice transport is authorized, receipt-confirmed and single-send."""
 import asyncio
 import json
 from types import SimpleNamespace
@@ -86,4 +86,29 @@ def test_manual_send_works_with_automatic_participation_disabled(monkeypatch):
         finally:await bridge.terminate()
     asyncio.run(go())
     assert len(bot.calls)==1
+    assert calls[-1][1]['status']=='sent'
+
+
+@pytest.mark.parametrize('manual',[False,True])
+def test_idle_voice_uses_real_base64_parser_and_never_duplicates_text(monkeypatch,tmp_path,manual):
+    import wave,base64
+    wav=tmp_path/'voice.wav'
+    with wave.open(str(wav),'wb') as f:
+        f.setnchannels(1);f.setsampwidth(2);f.setframerate(24000);f.writeframes(b'\0\0'*240)
+    monkeypatch.setenv('AZUSA_MEDIA_ROOT',str(tmp_path))
+    bridge,bot,calls=fixture(monkeypatch)
+    voice=dict(ITEM,mode='voice',media_path=str(wav),manual=manual)
+    async def handler(request):
+        body=json.loads(request.content);calls.append((request.url.path,body))
+        if request.url.path.endswith('claim'):return httpx.Response(200,json={'messages':[voice]})
+        if request.url.path.endswith('authorize'):return httpx.Response(200,json={'allowed':True})
+        return httpx.Response(200,json={'acknowledged':True})
+    async def go():
+        await bridge.client.aclose();bridge.client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:await bridge._idle_tick(manual=manual)
+        finally:await bridge.terminate()
+    asyncio.run(go())
+    assert len(bot.calls)==1
+    message=bot.calls[0][1]['message'];assert len(message)==1 and message[0]['type']=='record'
+    assert base64.b64decode(message[0]['data']['file'][9:])==wav.read_bytes()
     assert calls[-1][1]['status']=='sent'

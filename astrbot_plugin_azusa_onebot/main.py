@@ -180,6 +180,12 @@ class AzusaOneBot(Star):
                     continue
                 if not isinstance(text,str) or not text.strip() or len(text)>600:
                     raise ValueError('Invalid idle text')
+                if item.get('mode','text') not in {'text','voice'}:
+                    raise ValueError('Invalid idle output mode')
+                chain = self._message(dict(item,mode=item.get('mode','text')))
+                outgoing = await AiocqhttpMessageEvent._parse_onebot_json(chain)
+                if len(outgoing)!=1 or outgoing[0].get('type') not in {'text','record'}:
+                    raise ValueError('Exactly one idle output required')
                 authorization = await self.client.post(base+'/bridge/idle/authorize',headers=headers,
                     json={**{key:ack[key] for key in ('id','claim_token','self_id')}},timeout=10)
                 authorization.raise_for_status()
@@ -191,7 +197,7 @@ class AzusaOneBot(Star):
                     continue
                 ack['status']='uncertain'
                 receipt = await bot.send_group_msg(group_id=int(target), self_id=int(item['self_id']),
-                    message=[{'type':'text','data':{'text':text}}])
+                    message=outgoing)
                 if not isinstance(receipt,dict):
                     raise ValueError('Missing idle receipt')
                 ack.update(status='sent',message_id=message_id(receipt.get('message_id')))
