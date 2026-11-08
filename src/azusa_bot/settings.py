@@ -147,7 +147,9 @@ def root_path() -> Path:
 def private_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, filename = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    from .host import protect
     tmp = Path(filename)
+    protect(tmp)
     try:
         with os.fdopen(fd, "w") as f:
             f.write(text)

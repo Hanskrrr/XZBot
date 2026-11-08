@@ -48,6 +48,9 @@ def vm_state(root=ROOT, *, allow_partial=False):
 
 
 def stop_bridge(root=ROOT):
+    from azusa_bot.native_process import stop_owned_bridge
+    if os.name == "nt":
+        return stop_owned_bridge(root)
     layout = runtime_layout(root)
     path = root / "data/onebot-launch.pid"
     if not path.exists():
@@ -77,6 +80,10 @@ def stop_bridge(root=ROOT):
 
 
 def stop():
+    from azusa_bot.external_runtime import enabled
+    if enabled(ROOT):
+        with startup_guard(ROOT):stop_bridge()
+        return
     with startup_guard(ROOT):
         # Verify the VM before touching any process. No fallback to ~/.lima.
         state = vm_state(allow_partial=True)
@@ -94,6 +101,10 @@ def stop():
 
 
 def start():
+    from azusa_bot.external_runtime import enabled
+    if enabled(ROOT):
+        with startup_guard(ROOT):ensure_bridge(ROOT)
+        return
     with startup_guard(ROOT):
         if not vm_prepared(ROOT):
             raise RuntimeError("runtime_not_prepared")

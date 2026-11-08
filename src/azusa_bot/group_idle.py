@@ -40,6 +40,7 @@ class IdleConversation:
     def __init__(self, engine, *, clock=time.time):
         self.engine, self.clock = engine, clock
         self.pending = {}
+        self.manual_requests = {}
         self.lock = asyncio.Lock()
         with engine.ledger.db() as db:
             db.executescript("""
@@ -53,12 +54,17 @@ class IdleConversation:
                     at REAL NOT NULL,status TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS idle_scope_time ON group_idle_attempts(scope,at);
             """)
+            if 'source' not in {row[1] for row in db.execute('PRAGMA table_info(group_idle_attempts)')}:
+                db.execute("ALTER TABLE group_idle_attempts ADD COLUMN source TEXT NOT NULL DEFAULT 'automatic'")
         # Restart/switch requires fresh human activity; it cannot replay a draft
         # or turn an old quiet group into an immediate unsolicited greeting.
         self.invalidate()
 
     def _prune(self, db):
         now = self.clock()
+        db.execute("UPDATE group_idle_attempts SET status='expired' WHERE status IN ('queued','generating','prepared','authorized') AND at<=?",(now-240,))
+        for number,item in list(self.manual_requests.items()):
+            if now-item['at']>=240:self.manual_requests.pop(number,None)
         db.execute("DELETE FROM group_idle_attempts WHERE at<?", (now-7*86400,))
         db.execute("DELETE FROM group_idle_rooms WHERE last_at<?", (now-7*86400,))
         for number, item in list(self.pending.items()):
@@ -73,8 +79,11 @@ class IdleConversation:
             if scope is not None:
                 where += " AND scope=?"; params.append(scope)
             db.execute("UPDATE group_idle_rooms SET attempted=version WHERE " + where, params)
-            db.execute("UPDATE group_idle_attempts SET status='cancelled' WHERE status IN ('generating','prepared','authorized') AND " + where, params)
+            db.execute("UPDATE group_idle_attempts SET status='cancelled' WHERE status IN ('queued','generating','prepared','authorized') AND " + where, params)
             self._prune(db)
+        for number, item in list(self.manual_requests.items()):
+            if scope is None or item['scope'] == scope:
+                self.manual_requests.pop(number, None)
         for number, item in list(self.pending.items()):
             if scope is None or item['scope'] == scope:
                 self.pending.pop(number, None)
@@ -115,6 +124,7 @@ class IdleConversation:
 
     def _finish(self, number, status):
         self.pending.pop(number, None)
+        self.manual_requests.pop(number, None)
         with self.engine.ledger.db() as db:
             db.execute('UPDATE group_idle_attempts SET status=? WHERE id=?', (status, number))
 
@@ -124,18 +134,20 @@ class IdleConversation:
     def _valid(self, candidate, *, require_hours=True):
         engine, now = self.engine, self.clock()
         settings = engine.settings(candidate["scope"])
-        if (not engine.is_active() or not enabled(settings, candidate['target_id'])
+        manual = candidate.get('manual') is True
+        allowed = (settings.transport == 'onebot' and settings.onebot_enabled and candidate['target_id'] in settings.onebot_allowed_groups) if manual else enabled(settings, candidate['target_id'])
+        if (not engine.is_active() or not allowed
                 or candidate['self_id'] != settings.onebot_self_id
                 or candidate['generation'] != engine.generation(candidate['scope'])
                 or candidate['power_epoch'] != read_control(engine.root)['epoch']
-                or require_hours and not in_hours(settings, now)
+                or not manual and require_hours and not in_hours(settings, now)
                 or now-candidate['at'] >= 240):
             return False
         with engine.ledger.db() as db:
             row = db.execute('SELECT version,last_at FROM group_idle_rooms WHERE scope=? AND profile_id=?',
                              (candidate['scope'], engine.profile_id)).fetchone()
         return bool(row and row['version'] == candidate['version']
-            and now-row['last_at'] >= settings.group_idle_minutes*60)
+            and (manual or now-row['last_at'] >= settings.group_idle_minutes*60))
 
     async def claim(self, self_id):
         engine = self.engine
@@ -164,7 +176,7 @@ class IdleConversation:
                     continue
                 with engine.ledger.db() as db:
                     db.execute('BEGIN IMMEDIATE')
-                    count = db.execute('SELECT COUNT(*) FROM group_idle_attempts WHERE scope=? AND at>=?',
+                    count = db.execute("SELECT COUNT(*) FROM group_idle_attempts WHERE scope=? AND at>=? AND source='automatic'",
                                        (row['scope'], self._day_start())).fetchone()[0]
                     if count >= settings.group_idle_daily_limit:
                         continue
@@ -173,7 +185,7 @@ class IdleConversation:
                     if not updated:
                         continue
                     number = uuid.uuid4().hex
-                    db.execute('INSERT INTO group_idle_attempts VALUES (?,?,?,?,?)',
+                    db.execute('INSERT INTO group_idle_attempts (id,scope,profile_id,at,status) VALUES (?,?,?,?,?)',
                                (number, row['scope'], engine.profile_id, now, 'generating'))
                 candidate = dict(id=number, claim_token=secrets.token_hex(16), at=now,
                     scope=row['scope'], target_id=group, self_id=self_id, version=row['version'],
@@ -181,58 +193,109 @@ class IdleConversation:
                 break
             if candidate is None:
                 return []
-            number = candidate['id']
-            try:
-                async with engine.groups.lock(candidate['scope']), engine._capacity:
-                    if not self._valid(candidate):
-                        self._finish(number, 'cancelled'); return []
-                    settings = engine.settings(candidate["scope"])
-                    if not engine.groups.budget_status(candidate['scope'], **engine._group_budget(settings))['allowed']:
-                        self._finish(number, 'budget'); return []
-                    context = engine._group_snapshot(candidate['scope'], settings)
-                    from .core import clean_reply
-                    persona = (engine.content_root/'content/persona.md').read_text()
-                    knowledge = lore.for_prompt(engine.content_root, '轻松日常闲聊')
-                    refs = trace_references(knowledge=knowledge, persona=persona, group_context=context)
-                    confidence_policy=engine.confidence_policy(candidate["scope"],settings)
-                    refs["confidence_policy"]=confidence_policy
-                    settings=settings.model_copy(update={"group_chat_confidence_threshold":confidence_policy["effective"]})
-                    refs['_text_preview_allowed'] = engine._preview_context_allowed(candidate['scope'], context)
-                    policy = with_persona(engine.content_root,persona,'\n'.join(prompt(engine.content_root,key,settings)
-                        for key in ('idle','knowledge','style')),settings)
-                    messages = [{'role':'system','content':policy}, {'role':'user','content':prompt(engine.content_root,"group_header",settings)+json.dumps(
-                        {'recent_group_messages':context, 'lore':knowledge, 'available_expressions':[],
-                         'latest_speaker_id':self_id, 'latest_speaker_own_memories':[]}, ensure_ascii=False)}]
-                    answer = await engine._complete_traced(None, messages, settings, kind='group_idle',
-                        trigger='background', scope=candidate['scope'], user=self_id, refs=refs,
-                        context_generation=candidate['generation'], request_text=f'冷场检查：群内至少{settings.group_idle_minutes}分钟无人发言')
-                    engine.provider_success(settings)
-                    if not self._valid(candidate):
-                        self._finish(number, 'cancelled'); return []
-                    if answer.get('_voting_invalid'):
-                        self._finish(number, 'invalid_votes'); return []
-                    confidence = answer.get('confidence')
-                    text = clean_reply(answer.get('text','') if isinstance(answer.get('text'),str) else '')
-                    if (answer.get('participate') is not True or type(confidence) not in (int,float)
-                            or not settings.group_chat_confidence_threshold <= confidence <= 1 or not text or len(text)>settings.group_chat_max_reply_chars
-                            or '@' in text or '[CQ:' in text):
-                        self._finish(number, 'silent'); return []
-                    reservation = engine.groups.reserve(candidate['scope'], **engine._group_budget(settings))
-                    if not reservation:
-                        self._finish(number, 'budget'); return []
-                    candidate.update(text=text, reservation=reservation, status='prepared')
-                    self.pending[number] = candidate
-                    with engine.ledger.db() as db:
-                        db.execute("UPDATE group_idle_attempts SET status='prepared' WHERE id=?", (number,))
-                    return [{key:candidate[key] for key in ('id','claim_token','self_id','target_id','text')}]
-            except asyncio.CancelledError:
-                self._finish(number, 'interrupted')
-                raise
-            except Exception as error:
-                if isinstance(error, ProviderError):
-                    engine.provider_failure(error, settings)
-                self._finish(number, 'failed')
-                return []
+            return await self._generate(candidate)
+
+    async def _generate(self, candidate):
+        engine = self.engine
+        manual = candidate.get('manual') is True
+        self_id = candidate['self_id']
+        settings = engine.settings(candidate['scope'])
+        number = candidate['id']
+        try:
+            async with engine.groups.lock(candidate['scope']), engine._capacity:
+                if not self._valid(candidate):
+                    self._finish(number, 'cancelled'); return []
+                settings = engine.settings(candidate["scope"])
+                if not manual and not engine.groups.budget_status(candidate['scope'], **engine._group_budget(settings))['allowed']:
+                    self._finish(number, 'budget'); return []
+                context = engine._group_snapshot(candidate['scope'], settings)
+                from .core import clean_reply
+                persona = (engine.content_root/'content/persona.md').read_text()
+                knowledge = lore.for_prompt(engine.content_root, '轻松日常闲聊')
+                refs = trace_references(knowledge=knowledge, persona=persona, group_context=context)
+                refs['idle_attempt_id'] = number
+                confidence_policy=engine.confidence_policy(candidate["scope"],settings)
+                refs["confidence_policy"]=confidence_policy
+                settings=settings.model_copy(update={"group_chat_confidence_threshold":confidence_policy["effective"]})
+                refs['_text_preview_allowed'] = engine._preview_context_allowed(candidate['scope'], context)
+                policy = with_persona(engine.content_root,persona,'\n'.join(prompt(engine.content_root,key,settings)
+                    for key in ('manual_idle' if manual else 'idle','knowledge','style')),settings)
+                messages = [{'role':'system','content':policy}, {'role':'user','content':prompt(engine.content_root,"group_header",settings)+json.dumps(
+                    {'recent_group_messages':context, 'lore':knowledge, 'available_expressions':[],
+                     'latest_speaker_id':self_id, 'latest_speaker_own_memories':[]}, ensure_ascii=False)}]
+                answer = await engine._complete_traced(None, messages, settings, kind='group_idle_manual' if manual else 'group_idle',
+                    trigger='manual' if manual else 'background', scope=candidate['scope'], user=self_id, refs=refs,
+                    context_generation=candidate['generation'], request_text='管理界面：立即发起一次群聊' if manual else f'冷场检查：群内至少{settings.group_idle_minutes}分钟无人发言')
+                engine.provider_success(settings)
+                if not self._valid(candidate):
+                    self._finish(number, 'cancelled'); return []
+                if not manual and answer.get('_voting_invalid'):
+                    self._finish(number, 'invalid_votes'); return []
+                confidence = answer.get('confidence')
+                text = clean_reply(answer.get('text','') if isinstance(answer.get('text'),str) else '')
+                if ((not manual and (answer.get('participate') is not True or type(confidence) not in (int,float)
+                        or not settings.group_chat_confidence_threshold <= confidence <= 1)) or not text or len(text)>settings.group_chat_max_reply_chars
+                        or '@' in text or '[CQ:' in text):
+                    self._finish(number, 'silent'); return []
+                reservation = None if manual else engine.groups.reserve(candidate['scope'], **engine._group_budget(settings))
+                if not manual and not reservation:
+                    self._finish(number, 'budget'); return []
+                candidate.update(text=text, reservation=reservation, status='prepared')
+                self.pending[number] = candidate
+                with engine.ledger.db() as db:
+                    db.execute("UPDATE group_idle_attempts SET status='prepared' WHERE id=?", (number,))
+                return [{**{key:candidate[key] for key in ('id','claim_token','self_id','target_id','text')}, 'manual':manual}]
+        except asyncio.CancelledError:
+            self._finish(number, 'interrupted')
+            raise
+        except Exception as error:
+            if isinstance(error, ProviderError):
+                engine.provider_failure(error, settings)
+            self._finish(number, 'failed')
+            return []
+    def manual_status(self, number):
+        with self.engine.ledger.db() as db:
+            self._prune(db)
+            row = db.execute("SELECT id,scope,status,at FROM group_idle_attempts WHERE id=? AND profile_id=? AND source='manual'", (number,self.engine.profile_id)).fetchone()
+        return dict(row) if row else None
+
+    def queue_manual(self, scope, number):
+        engine, now = self.engine, self.clock()
+        settings = engine.settings(scope)
+        group = scope.rsplit(':',1)[-1]
+        if (not re.fullmatch(r'[a-f0-9]{32}',number) or scope != f'onebot:{settings.onebot_self_id}:group:{group}'
+                or group not in settings.onebot_allowed_groups or settings.transport != 'onebot'
+                or not settings.onebot_enabled or not engine.is_active()):
+            raise ValueError('manual_idle_not_allowed')
+        previous = self.manual_status(number)
+        if previous:
+            if previous['scope'] != scope: raise ValueError('manual_idle_request_conflict')
+            return previous
+        with engine.ledger.db() as db:
+            self._prune(db)
+            if self.lock.locked() or self.pending or self.manual_requests:
+                raise ValueError('manual_idle_busy')
+            latest = db.execute("SELECT MAX(at) FROM group_idle_attempts WHERE profile_id=? AND source='manual'",(engine.profile_id,)).fetchone()[0]
+            if latest is not None and now-latest < 5: raise ValueError('manual_idle_cooldown')
+            db.execute("INSERT OR IGNORE INTO group_idle_rooms VALUES (?,?,?,1,1,'manual')", (scope,engine.profile_id,now))
+            row = db.execute('SELECT version FROM group_idle_rooms WHERE scope=? AND profile_id=?',(scope,engine.profile_id)).fetchone()
+            db.execute("INSERT INTO group_idle_attempts (id,scope,profile_id,at,status,source) VALUES (?,?,?,?,'queued','manual')", (number,scope,engine.profile_id,now))
+        self.manual_requests[number] = dict(id=number, claim_token=secrets.token_hex(16),at=now,
+            scope=scope,target_id=group,self_id=settings.onebot_self_id,version=row['version'],
+            generation=engine.generation(scope),power_epoch=read_control(engine.root)['epoch'],manual=True)
+        return self.manual_status(number)
+
+    async def claim_manual(self, self_id):
+        if self.lock.locked() or not self.manual_requests or self_id != self.engine.settings().onebot_self_id:
+            return []
+        async with self.lock:
+            number,candidate = next(iter(self.manual_requests.items()))
+            self.manual_requests.pop(number)
+            if not self._valid(candidate):
+                self._finish(number,'cancelled'); return []
+            with self.engine.ledger.db() as db:
+                db.execute("UPDATE group_idle_attempts SET status='generating' WHERE id=?",(number,))
+            return await self._generate(candidate)
 
     def authorize(self, number, token, self_id):
         item = self.pending.get(number) if isinstance(number,str) else None
@@ -255,7 +318,8 @@ class IdleConversation:
             return {'acknowledged':False}
         self._finish(number, status)
         if status == 'sent' and valid:
-            self.engine.groups.mark_sent(item['reservation'])
+            if item.get('reservation'):
+                self.engine.groups.mark_sent(item['reservation'])
             self.engine.groups.add(item['scope'], self_id, item['text'], message_id, display_name='自己', role='assistant')
             self.bot_spoke(item['scope'])
         return {'acknowledged':True}
@@ -265,7 +329,7 @@ class IdleConversation:
         with self.engine.ledger.db() as db:
             self._prune(db)
             rows = [dict(row) for row in db.execute('SELECT scope,last_at,version,attempted FROM group_idle_rooms WHERE profile_id=?', (self.engine.profile_id,))]
-            counts = {row['scope']:row['n'] for row in db.execute('SELECT scope,COUNT(*) n FROM group_idle_attempts WHERE at>=? GROUP BY scope', (self._day_start(),))}
+            counts = {row['scope']:row['n'] for row in db.execute("SELECT scope,COUNT(*) n FROM group_idle_attempts WHERE at>=? AND source='automatic' GROUP BY scope", (self._day_start(),))}
         by_scope = {row['scope']:row for row in rows}
         available = list(dict.fromkeys(settings.onebot_allowed_groups))
         groups = []

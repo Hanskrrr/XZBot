@@ -32,7 +32,7 @@ class CredentialStore:
 
     def storage_kind(self):
         marker=self.root/'data/credential-backend.json'
-        return 'private_file' if marker.exists() or marker.is_symlink() else 'macos_keychain'
+        return 'private_file' if marker.exists() or marker.is_symlink() else 'windows_credential_manager' if platform.system()=='Windows' else 'macos_keychain'
 
     def backend(self):
         if self.storage_kind()=='private_file':
@@ -43,6 +43,9 @@ class CredentialStore:
                 return PrivateFileBackend(self.root)
             except Exception:
                 raise CredentialStoreError('private_credentials_unavailable') from None
+        if platform.system() == "Windows":
+            from keyring.backends.Windows import WinVaultKeyring
+            return WinVaultKeyring()
         if platform.system() != "Darwin":
             raise CredentialStoreError("keychain_macos_required")
         try:

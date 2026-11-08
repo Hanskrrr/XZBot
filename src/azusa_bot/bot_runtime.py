@@ -1,10 +1,12 @@
 """Fixed host operations used by the authenticated whole-bot power control."""
 from __future__ import annotations
+from .host import python_at
 
 import asyncio
 import os
 from pathlib import Path
 import signal
+from .native_process import terminate_helper
 
 from .bot_control import BotPowerError
 from .napcat_admin import NapCatAdmin, NapCatError
@@ -18,7 +20,7 @@ class NativeBotRuntime:
     async def _run(self, action):
         if action not in {"start", "stop"}:
             raise BotPowerError("power_runtime_unavailable")
-        python = self.root / ".venv/bin/python"
+        python = python_at(self.root / ".venv")
         script = self.root / "scripts/bot_runtime_action.py"
         if not python.is_file() or not script.is_file() or script.is_symlink():
             raise BotPowerError("power_runtime_unavailable")
@@ -35,14 +37,14 @@ class NativeBotRuntime:
         except (asyncio.TimeoutError, asyncio.CancelledError) as error:
             # Only this newly created helper process group can be terminated.
             try:
-                os.killpg(process.pid, signal.SIGTERM)
+                terminate_helper(process)
             except ProcessLookupError:
                 pass
             try:
                 await asyncio.wait_for(process.wait(), timeout=5)
             except asyncio.TimeoutError:
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    terminate_helper(process,force=True)
                 except ProcessLookupError:
                     pass
                 await process.wait()

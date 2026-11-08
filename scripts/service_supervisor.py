@@ -1,7 +1,6 @@
 """User-session supervisor for the two owned services; no terminal window needed."""
 from __future__ import annotations
 
-import fcntl
 import os
 from pathlib import Path
 import signal
@@ -14,6 +13,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
 from start_onebot import core_ready, ensure_core, ensure_bridge, lock_held, port_open, start_vm, vm_prepared, startup_guard
 from azusa_bot.settings import private_write
 from azusa_bot.bot_control import activity_allowed
+from azusa_bot.host import file_locks as fcntl
 from azusa_bot.runtime_layout import runtime_layout
 
 

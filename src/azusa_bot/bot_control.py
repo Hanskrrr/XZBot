@@ -5,6 +5,8 @@ then asks the host adapter to stop the QQ runtime. Only an explicit successful
 start opens a new activity epoch; stale requests can never survive that cycle.
 """
 from __future__ import annotations
+from .host import private_info, private_path, protect, link_directory
+from .host import safe_open, NOFOLLOW
 
 import asyncio
 import json
@@ -28,7 +30,7 @@ def read_control(root: Path) -> dict:
     path = Path(root) / "data/bot-control.json"
     state = {"state": "running", "epoch": "legacy", "updated_at": 0., "error_code": ""}
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = safe_open(path, os.O_RDONLY | NOFOLLOW)
     except FileNotFoundError:
         if path.is_symlink():
             state.update(state="error", epoch="invalid", error_code="power_state_invalid")
@@ -38,8 +40,7 @@ def read_control(root: Path) -> dict:
         try:
             with os.fdopen(fd, "r") as stream:
                 info = os.fstat(stream.fileno())
-                if (not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077
-                        or info.st_uid != os.geteuid() or info.st_size > 4096):
+                if (not stat.S_ISREG(info.st_mode) or not private_info(info,stream.fileno()) or info.st_size > 4096):
                     raise ValueError()
                 data = json.load(stream)
             if (not isinstance(data, dict) or data.get("schema") != 1 or data.get("state") not in STATES

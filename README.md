@@ -30,7 +30,11 @@ AZUSA_ROOT="$PWD" .venv/bin/python -m azusa_bot.cli serve
 
 默认示例为模拟模式，QQ 回复关闭。管理页监听 `127.0.0.1:6196`，管理口令保存在本机 `data/admin.token`。首次设置和平台运行边界见 [开始使用](docs/getting-started.md)。
 
-**Mac 是现有完整部署路径；Linux/Windows 的宿主启停适配仍需完成。** Linux 可恢复配置并运行管理核心，但不能据此视为 QQ 端到端部署已验收。Windows 原生 NapCat 可用，XZBot 原生 Windows 仍有 POSIX 依赖。见 [平台支持](docs/platform-support.md)。
+**Mac 是现有完整部署路径；Linux/Windows 的宿主启停适配仍需完成。** Linux 可恢复配置并运行管理核心，但不能据此视为 QQ 端到端部署已验收。0.9 提供 Windows、macOS、Linux 原生启动发行包；安装与真实 QQ 验证边界见 [发行版说明](docs/releases.md)。见 [平台支持](docs/platform-support.md)。
+
+## 下载发行版
+
+在 [GitHub Releases](https://github.com/Hanskrrr/XZBot/releases) 下载对应平台的 ZIP，解压后双击或运行 Start-XZBot。首次需要网络安装 Python 和固定依赖；不包含个人 key 或 QQ 登录状态。
 
 ## 代码与私有数据
 

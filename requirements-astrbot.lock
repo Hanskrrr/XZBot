@@ -152,3 +152,4 @@ xinference-client==4.1.0
 xlrd==2.0.2
 xmltodict==1.0.4
 yarl==1.25.1
+pywin32==312; sys_platform == "win32"

@@ -12,7 +12,7 @@ import sys
 
 ROOT_FILES={'README.md','LICENSE','pyproject.toml','requirements-lock.txt','requirements-astrbot.lock','requirements-gemini-balance.lock','.gitignore','.gitattributes','启动QQ角色助手.command','启动管理台.command','停止QQ角色助手.command'}
 SOURCE_DIRS={'src','scripts','tests','ui','examples','astrbot_plugin_azusa_bridge','astrbot_plugin_azusa_onebot','.githooks','.github'}
-DOCS={'architecture.md','getting-started.md','synchronization.md','privacy.md','platform-support.md','public-migration.md'}
+DOCS={'architecture.md','getting-started.md','synchronization.md','privacy.md','platform-support.md','public-migration.md','releases.md'}
 BLOCKED_PARTS={'data','accounts','content','runtime','.runtime','dist','node_modules','.venv','__pycache__','.pytest_cache','.git'}
 RULES={
  'private_key':re.compile(rb'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'),

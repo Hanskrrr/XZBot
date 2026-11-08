@@ -6,6 +6,7 @@ This is permission-protected storage, not encryption or a system keychain.
 """
 from contextlib import contextmanager
 import json
+from .host import safe_open, NOFOLLOW
 import os
 from pathlib import Path
 import re
@@ -18,7 +19,7 @@ MARKER = {'backend':'private-file-v1'}
 
 def read_private(path: Path, maximum=600_000):
     if path.is_symlink():raise ValueError('private_credentials_path_invalid')
-    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    fd=safe_open(path,os.O_RDONLY|NOFOLLOW)
     with os.fdopen(fd) as stream:
         info=os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or info.st_mode&0o077 or info.st_size>maximum:
@@ -37,8 +38,8 @@ class PrivateFileBackend:
 
     @contextmanager
     def locked(self):
-        import fcntl
-        fd=os.open(self.directory/'portable-credentials.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
+        from .host import file_locks as fcntl
+        fd=safe_open(self.directory/'portable-credentials.lock',os.O_CREAT|os.O_RDWR|NOFOLLOW,0o600)
         with os.fdopen(fd,'a') as stream:
             info=os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or info.st_mode&0o077:

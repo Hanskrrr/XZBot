@@ -4,6 +4,7 @@ No method here contacts a model API. Installation fetches pinned public source
 and packages; health checks address only the child on 127.0.0.1.
 """
 from __future__ import annotations
+from .host import python_at
 
 import asyncio
 import json
@@ -64,7 +65,7 @@ class GeminiGateway:
         try:
             value = json.loads(marker.read_text())
             return (value == {"commit": COMMIT, "version": VERSION}
-                    and (self.venv / "bin/python").exists()
+                    and (python_at(self.venv)).exists()
                     and (self.source / "app/router/openai_compatiable_routes.py").is_file())
         except (OSError, ValueError):
             return False
@@ -137,9 +138,9 @@ class GeminiGateway:
                     if (self.source / "app").exists():
                         raise GatewayError("gemini_source_modified")
                 await self._run("git", "checkout", "--detach", COMMIT, cwd=self.source)
-                if not (self.venv / "bin/python").exists():
+                if not (python_at(self.venv)).exists():
                     await self._run(sys.executable, "-m", "venv", self.venv)
-                await self._run(self.venv / "bin/python", "-m", "pip", "install", "--disable-pip-version-check",
+                await self._run(python_at(self.venv), "-m", "pip", "install", "--disable-pip-version-check",
                                 "--no-cache-dir", "-r", self.root / "requirements-gemini-balance.lock")
                 private_write(self.runtime / "installation.json", json.dumps({"commit": COMMIT, "version": VERSION}))
                 self.last_error = ""
@@ -209,7 +210,7 @@ class GeminiGateway:
             try:
                 self.runtime.mkdir(parents=True, exist_ok=True, mode=0o700)
                 access = token(self.runtime, "access")
-                self.process = await asyncio.create_subprocess_exec(self.venv / "bin/python", "-I",
+                self.process = await asyncio.create_subprocess_exec(python_at(self.venv), "-I",
                     Path(__file__).with_name("gemini_bootstrap.py"), str(self.source), str(self.runtime),
                     cwd=self.runtime, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,

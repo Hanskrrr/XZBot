@@ -1,5 +1,6 @@
 """Profile-local, reviewed expression images. No remote image fetches or paths from models."""
 from __future__ import annotations
+from .host import safe_open, NOFOLLOW
 
 import base64
 import binascii
@@ -170,7 +171,7 @@ class AssetStore:
 
     def _bytes(self, item):
         path = self._path(item)
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        descriptor = safe_open(path, os.O_RDONLY | NOFOLLOW)
         with os.fdopen(descriptor, "rb") as stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 raise AssetError("asset_file_invalid")
@@ -252,7 +253,7 @@ class AssetStore:
             item.update(id=number, file=number+extension, sha256=hashlib.sha256(raw).hexdigest(),
                         revision=uuid.uuid4().hex, **metadata)
             path = self.base / item["file"]
-            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            descriptor = safe_open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             with os.fdopen(descriptor, "wb") as stream:
                 stream.write(raw)
                 stream.flush()
@@ -349,7 +350,7 @@ class AssetStore:
             destination.mkdir(parents=True, exist_ok=True, mode=0o700)
             extension = ".jpg" if metadata["format"] == "jpeg" else "."+metadata["format"]
             target = destination / (uuid.uuid4().hex+extension)
-            descriptor = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            descriptor = safe_open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             with os.fdopen(descriptor, "wb") as stream:
                 stream.write(raw)
             return {"mode":"image", "text":"", "media_path":str(target.resolve()),

@@ -11,6 +11,8 @@ import uuid
 ROOT = Path(os.environ.get("AZUSA_ROOT", Path(__file__).resolve().parents[1])).resolve()
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
 from azusa_bot.runtime_layout import runtime_layout
+from azusa_bot.host import python_at
+from azusa_bot.external_runtime import enabled as external_runtime
 from azusa_bot.bot_control import read_control
 from azusa_bot.settings import private_write
 from start_onebot import ensure_core, open_management, startup_guard, vm_prepared, lock_held, spawn, wait_ready
@@ -21,7 +23,7 @@ def ensure_supervisor(root):
     lock = root / "data/service-supervisor.lock"
     if lock_held(lock):
         return
-    child = spawn(root, [str(root / ".venv/bin/python"),
+    child = spawn(root, [str(python_at(root / ".venv")),
                         str(root / "scripts/service_supervisor.py")], "service.log")
     # The supervisor takes its lifetime lock BEFORE startup_guard. Wait only
     # for that lock, never its service startup (which needs our current guard).
@@ -56,9 +58,13 @@ def main():
             # have started an owned VM, and Stop must not short-circuit.
             private_write(ROOT / "data/bot-control.json", json.dumps({"schema": 1, "state": "error",
                 "epoch": uuid.uuid4().hex, "updated_at": time.time(), "error_code": "power_qq_login_required"}))
+            if external_runtime(ROOT):
+                from prepare_onebot import prepare
+                prepare()
+                return
             if not vm_prepared(ROOT):
-                subprocess.run([str(ROOT / ".venv/bin/python"), str(ROOT / "scripts/napcat_runtime.py"), "setup"], check=True)
-            subprocess.run([str(ROOT / ".venv/bin/python"), str(ROOT / "scripts/napcat_runtime.py"), "start"], check=True)
+                subprocess.run([str(python_at(ROOT / ".venv")), str(ROOT / "scripts/napcat_runtime.py"), "setup"], check=True)
+            subprocess.run([str(python_at(ROOT / ".venv")), str(ROOT / "scripts/napcat_runtime.py"), "start"], check=True)
         if action == "open":
             open_management(ROOT)
 

@@ -1,8 +1,9 @@
 """Fixed local desktop startup settings; never accepts a command from the browser."""
 from __future__ import annotations
 
-import fcntl
+from .host import file_locks as fcntl
 import os
+import platform
 from pathlib import Path
 import plistlib
 import stat
@@ -23,6 +24,7 @@ class DesktopService:
         self.application = self.home / "Applications/XZBot.app"
 
     def _owned_agent(self):
+        if platform.system() != "Darwin":return False
         if self.agent.is_symlink():
             raise ValueError("desktop_foreign_launch_agent")
         if not self.agent.exists():
@@ -49,12 +51,13 @@ class DesktopService:
                     running = True
                 else:
                     fcntl.flock(stream, fcntl.LOCK_UN)
-        return {"project_path": str(self.root), "application_path": str(self.application),
+        return {"autostart_supported":platform.system()=="Darwin", "project_path": str(self.root), "application_path": str(self.application),
                 "application_installed": self.application.is_dir(),
                 "supervisor_running": running, "autostart_enabled": self._owned_agent(),
                 "note": "关闭页面不停止服务。登录自启更改在下次登录生效；关闭自启不会关闭当前服务。"}
 
     def set_autostart(self, body):
+        if platform.system() != "Darwin":raise ValueError("desktop_autostart_macos_only")
         if not isinstance(body, dict) or set(body) != {"enabled"} or type(body["enabled"]) is not bool:
             raise ValueError("desktop_invalid_autostart")
         owned = self._owned_agent()

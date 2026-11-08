@@ -9,6 +9,7 @@ import sys
 ROOT = Path(os.environ.get("AZUSA_ROOT", Path(__file__).resolve().parents[1])).resolve()
 sys.path.insert(0, str(ROOT / "src"))
 from azusa_bot.settings import private_write, read_settings, token
+from azusa_bot.host import private_info, private_path, protect, link_directory
 from azusa_bot.runtime_layout import runtime_layout
 
 
@@ -49,7 +50,7 @@ def prepare():
     },indent=2))
     link = runtime / "data/plugins/astrbot_plugin_azusa_onebot"
     if not link.exists():
-        link.symlink_to(ROOT / "astrbot_plugin_azusa_onebot", target_is_directory=True)
+        link_directory(link, ROOT / 'astrbot_plugin_azusa_onebot')
     return runtime
 
 

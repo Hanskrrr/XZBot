@@ -8,7 +8,7 @@ from copy import deepcopy
 import json
 import math
 
-CHAT_KINDS = frozenset({'reply', 'group_decision', 'followup', 'group_idle'})
+CHAT_KINDS = frozenset({'reply', 'group_decision', 'followup', 'group_idle', 'group_idle_manual'})
 RECENT_KEYS = ('recent_group_messages', 'confirmed_direct_dialogue', 'confirmed_dialogue')
 ROW_KEYS = ('role', 'user_id', 'message_id', 'display_name', 'text', 'mode', 'age_seconds')
 
@@ -103,7 +103,7 @@ def render(messages, *, kind, prefixes, contract=None, contract_text=None):
         anchor['text'] = messages[-1]['content']
         # Legacy raw history is evidence, never new current conversation.
         if messages[2:-1]:data['earlier_history'] = deepcopy(messages[2:-1])
-    if kind != 'group_idle' and not isinstance(anchor.get('text'), str):
+    if kind not in {'group_idle','group_idle_manual'} and not isinstance(anchor.get('text'), str):
         raise ValueError('request_context_anchor_missing')
     recent = _timeline(streams, anchor, direct_streams=(1, 2, 3))
     # All retrieval results and auxiliary metadata precede real dialogue.
@@ -117,11 +117,11 @@ def render(messages, *, kind, prefixes, contract=None, contract_text=None):
         result.append({'role':'system', 'content':label+'\n'+json.dumps(contract,ensure_ascii=False)})
     elif kind == 'followup':
         result[0]['content'] += '\n'+prefixes['followup_header'].rstrip()
-    if recent or (kind == 'group_idle' and contract is not None):
+    if recent or (kind in {'group_idle','group_idle_manual'} and contract is not None):
         # An empty transcript truthfully represents a quiet room; keep a user
         # data envelope last without inventing a new message from a member.
         result.append({'role':'user', 'content':prefixes['recent_header']+json.dumps({'recent_conversation':recent},ensure_ascii=False)})
-    if kind != 'group_idle':
+    if kind not in {'group_idle','group_idle_manual'}:
         result.append({'role':'user', 'content':prefixes['current_header']+json.dumps({'current_message':anchor},ensure_ascii=False)})
     return result
 
@@ -132,6 +132,6 @@ def layout(messages, *, kind):
     stages = ['persona', 'background']
     has_contract = len(messages)>2 and messages[2].get('role')=='system'
     if has_contract:stages.append('reply_contract')
-    if len(messages) > (2 if kind == 'group_idle' else 3)+int(has_contract):stages.append('recent_conversation')
-    if kind != 'group_idle':stages.append('current_message')
-    return {'version':1, 'order':stages, 'current_message_last':kind != 'group_idle'}
+    if len(messages) > (2 if kind in {'group_idle','group_idle_manual'} else 3)+int(has_contract):stages.append('recent_conversation')
+    if kind not in {'group_idle','group_idle_manual'}:stages.append('current_message')
+    return {'version':1, 'order':stages, 'current_message_last':kind not in {'group_idle','group_idle_manual'}}

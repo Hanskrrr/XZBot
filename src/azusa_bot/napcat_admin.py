@@ -2,6 +2,8 @@
 import asyncio
 import hashlib
 import io
+from .host import safe_open, NOFOLLOW
+from .host import private_info, private_path, protect, link_directory
 import os
 from pathlib import Path
 import re
@@ -40,10 +42,10 @@ class NapCatAdmin:
     def _token(self):
         path = self.root / "data/napcat-webui.token"
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            fd = safe_open(path, os.O_RDONLY | NOFOLLOW)
             with os.fdopen(fd) as f:
                 st = os.fstat(f.fileno())
-                if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+                if not stat.S_ISREG(st.st_mode) or not private_info(st,f.fileno()):
                     raise ValueError()
                 value = f.read(1024).strip()
                 if not 32 <= len(value) < 1024:

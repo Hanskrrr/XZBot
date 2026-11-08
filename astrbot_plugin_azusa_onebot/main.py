@@ -5,6 +5,7 @@ import asyncio
 import base64
 from contextlib import suppress
 import os
+from azusa_bot.host import safe_open, NOFOLLOW, private_info, private_path
 import re
 import stat
 import sys
@@ -59,15 +60,21 @@ class AzusaOneBot(Star):
         )
         self._notification_task = None
         self._idle_task = None
+        self._manual_idle_task = None
         self._status_task = None
         self._delivery_locks = [asyncio.Lock() for _ in range(64)]
 
     async def initialize(self):
         self._notification_task = asyncio.create_task(self._notification_loop())
         self._idle_task = asyncio.create_task(self._idle_loop())
+        self._manual_idle_task = asyncio.create_task(self._manual_idle_loop())
         self._status_task = asyncio.create_task(self._status_loop())
 
     async def terminate(self):
+        if self._manual_idle_task:
+            self._manual_idle_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._manual_idle_task
         if self._status_task:
             self._status_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -130,9 +137,17 @@ class AzusaOneBot(Star):
             except Exception:
                 logger.warning("XZBot idle participation check unavailable")
 
-    async def _idle_tick(self):
+    async def _manual_idle_loop(self):
+        while True:
+            await asyncio.sleep(2)
+            try:
+                await self._idle_tick(manual=True)
+            except Exception:
+                logger.warning('XZBot manual conversation delivery unavailable')
+
+    async def _idle_tick(self, *, manual=False):
         policy = self._policy()
-        if not policy['enabled'] or not policy['group_chat_enabled'] or not policy['group_idle_enabled'] or not policy['idle_groups']:
+        if not policy['enabled'] or (not manual and (not policy['group_chat_enabled'] or not policy['group_idle_enabled'] or not policy['idle_groups'])):
             return
         platform = self.context.get_platform_inst(self.config.get('adapter_id','azusa-onebot'))
         if platform is None or platform.meta().name != 'aiocqhttp':
@@ -141,7 +156,7 @@ class AzusaOneBot(Star):
         if policy['self_id'] not in getattr(bot, '_wsr_api_clients', {}):
             return
         base, headers = self._endpoint(), {'Authorization':'Bearer '+self._token()}
-        response = await self.client.post(base+'/bridge/idle/claim', headers=headers,
+        response = await self.client.post(base+('/bridge/idle/manual-claim' if manual else '/bridge/idle/claim'), headers=headers,
             json={'self_id':policy['self_id']}, timeout=240)
         response.raise_for_status()
         items = response.json().get('messages')
@@ -158,7 +173,8 @@ class AzusaOneBot(Star):
                 target = numeric_id(item.get('target_id'))
                 text = item.get('text')
                 if (item.get('self_id') != policy['self_id'] or not current['enabled']
-                        or not current['group_chat_enabled'] or not current['group_idle_enabled'] or target not in current['idle_groups']
+                        or (manual and item.get('manual') is not True)
+                        or (not manual and (not current['group_chat_enabled'] or not current['group_idle_enabled'] or target not in current['idle_groups']))
                         or current['self_id'] != policy['self_id']
                         or not self._scope_allowed(current,'group',target)):
                     continue
@@ -170,8 +186,8 @@ class AzusaOneBot(Star):
                 if authorization.json().get('allowed') is not True:
                     continue
                 current = self._policy()
-                if (not current['enabled'] or not current['group_chat_enabled'] or not current['group_idle_enabled']
-                        or target not in current['idle_groups'] or current['self_id'] != item['self_id'] or not self._scope_allowed(current,'group',target)):
+                if (not current['enabled'] or (not manual and (not current['group_chat_enabled'] or not current['group_idle_enabled']
+                        or target not in current['idle_groups'])) or current['self_id'] != item['self_id'] or not self._scope_allowed(current,'group',target)):
                     continue
                 ack['status']='uncertain'
                 receipt = await bot.send_group_msg(group_id=int(target), self_id=int(item['self_id']),
@@ -272,7 +288,7 @@ class AzusaOneBot(Star):
                 or not path.resolve(strict=True).is_relative_to(root)
                 or not re.fullmatch(r"[a-f0-9]{32}\.png", path.name)):
                 raise ValueError()
-            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            descriptor = safe_open(path, os.O_RDONLY | NOFOLLOW)
             with os.fdopen(descriptor, "rb") as stream:
                 info = os.fstat(stream.fileno())
                 if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 8 * 1024 * 1024:
@@ -291,7 +307,7 @@ class AzusaOneBot(Star):
         value = os.environ.get("AZUSA_BRIDGE_TOKEN", "").strip()
         if not value:
             path = Path(os.environ.get("AZUSA_BRIDGE_TOKEN_FILE", ""))
-            if not path.is_file() or stat.S_IMODE(path.stat().st_mode) & 0o077:
+            if not path.is_file() or not private_path(path):
                 raise ValueError("Missing private bridge token file")
             value = path.read_text().strip()
         if len(value) < 32:
@@ -323,11 +339,10 @@ class AzusaOneBot(Star):
                 raise ValueError("Policy path must be absolute")
             # O_NOFOLLOW plus fstat checks the opened file, avoiding a symlink or
             # permission-check/read race. Atomic GUI writes are safe to refresh.
-            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            descriptor = safe_open(path, os.O_RDONLY | NOFOLLOW)
             with os.fdopen(descriptor, "r") as stream:
                 info = os.fstat(stream.fileno())
-                if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077
-                    or info.st_uid != os.geteuid() or info.st_size > 250000):
+                if (not stat.S_ISREG(info.st_mode) or not private_info(info,stream.fileno()) or info.st_size > 250000):
                     raise ValueError("Private owner-controlled policy file required")
                 policy = json.load(stream)
         if not isinstance(policy, dict):
@@ -351,14 +366,13 @@ class AzusaOneBot(Star):
         if filename:
             groups_path=Path(filename).with_name("groups.json")
             try:
-                descriptor=os.open(groups_path,os.O_RDONLY | os.O_NOFOLLOW)
+                descriptor=safe_open(groups_path,os.O_RDONLY | NOFOLLOW)
             except FileNotFoundError:
                 pass
             else:
                 with os.fdopen(descriptor,"r") as stream:
                     info=os.fstat(stream.fileno())
-                    if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode)&0o077
-                        or info.st_uid!=os.geteuid() or info.st_size>1024*1024):
+                    if (not stat.S_ISREG(info.st_mode) or not private_info(info,stream.fileno()) or info.st_size>1024*1024):
                         raise ValueError("Private group policy required")
                     overrides=json.load(stream)
                 if not isinstance(overrides,dict):raise ValueError("Invalid group policy")

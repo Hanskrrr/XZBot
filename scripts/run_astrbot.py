@@ -2,7 +2,6 @@
 
 import copy
 import errno
-import fcntl
 import os
 import runpy
 import socket
@@ -10,6 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(os.environ.get("AZUSA_ROOT", Path(__file__).resolve().parents[1])) / "src"))
+from azusa_bot.host import file_locks as fcntl
 from azusa_bot.runtime_layout import runtime_layout
 layout = runtime_layout(Path(os.environ.get("AZUSA_ROOT", Path(__file__).resolve().parents[1])))
 os.environ["DASHBOARD_PORT"] = str(layout.core_port - 1)

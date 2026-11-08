@@ -1,9 +1,10 @@
 """Local FTS5 knowledge: atomic source manifest, rebuildable index, no network."""
 from __future__ import annotations
+from .host import safe_open, NOFOLLOW
 from collections import Counter
 from contextlib import contextmanager
 from datetime import date, datetime
-import fcntl
+from .host import file_locks as fcntl
 import hashlib
 import json
 import os
@@ -87,7 +88,7 @@ def _stamp(path):
 
 def _read(path, maximum):
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        descriptor = safe_open(path, os.O_RDONLY | NOFOLLOW)
         with os.fdopen(descriptor, "rb") as stream:
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_size > maximum:
@@ -289,7 +290,7 @@ class _Index:
             for path in (self.root,self.root/"content",self.home,self.blobs,self.root/"data"):
                 _directory(path)
             try:
-                descriptor = os.open(self.home/".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+                descriptor = safe_open(self.home/".lock", os.O_CREAT | os.O_RDWR | NOFOLLOW, 0o600)
             except OSError:
                 raise ValueError("knowledge_lock_unavailable_or_symlink") from None
             try:
@@ -335,7 +336,7 @@ class _Index:
     @contextmanager
     def db(self):
         if _stamp(self.database) is None:
-            descriptor = os.open(self.database,os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,0o600)
+            descriptor = safe_open(self.database,os.O_CREAT | os.O_EXCL | os.O_WRONLY | NOFOLLOW,0o600)
             os.close(descriptor)
         for suffix in ("-journal","-wal","-shm"):
             _stamp(Path(str(self.database)+suffix))

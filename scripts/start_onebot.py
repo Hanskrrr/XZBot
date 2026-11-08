@@ -1,7 +1,6 @@
 """Double-click launcher: reuse local services, start only a prepared isolated QQ VM."""
 from __future__ import annotations
 
-import fcntl
 from contextlib import contextmanager
 import json
 import os
@@ -12,6 +11,8 @@ import stat
 import subprocess
 import sys
 import time
+import platform
+import webbrowser
 import urllib.error
 import urllib.request
 
@@ -19,6 +20,10 @@ ROOT = Path(os.environ.get("AZUSA_ROOT", Path(__file__).resolve().parents[1])).r
 sys.path.insert(0, str(ROOT / "src"))
 from azusa_bot.settings import private_write, token
 from azusa_bot.bot_control import activity_allowed
+from azusa_bot.host import python_at
+from azusa_bot.host import private_info, private_path, protect, link_directory
+from azusa_bot.host import safe_open, NOFOLLOW
+from azusa_bot.host import file_locks as fcntl
 from azusa_bot.runtime_layout import runtime_layout
 from napcat_runtime import VERSION as NAPCAT_VERSION, SHA256 as NAPCAT_SHA256, VM as NAPCAT_VM
 
@@ -34,7 +39,7 @@ def port_open(port: int) -> bool:
 def core_ready(root: Path) -> bool:
     """Authenticate the existing service instead of trusting an occupied port."""
     path = root / "data/admin.token"
-    if not path.is_file() or path.is_symlink() or path.stat().st_mode & 0o077:
+    if not path.is_file() or path.is_symlink() or not private_path(path):
         return False
     try:
         request = urllib.request.Request(runtime_layout(root).core_url + "/admin/status",
@@ -64,7 +69,7 @@ def lock_held(path: Path) -> bool:
 def startup_guard(root: Path):
     """All GUI, supervisor and legacy script starts share this interprocess lock."""
     (root / "data").mkdir(parents=True, exist_ok=True, mode=0o700)
-    descriptor = os.open(root / "data/start-onebot.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    descriptor = safe_open(root / "data/start-onebot.lock", os.O_WRONLY | os.O_CREAT | NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "a") as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         yield
@@ -72,8 +77,8 @@ def startup_guard(root: Path):
 
 def private_log(root: Path, name: str):
     path = root / "data" / name
-    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    os.fchmod(descriptor, 0o600)
+    descriptor = safe_open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | NOFOLLOW, 0o600)
+    protect(path)
     return os.fdopen(descriptor, "ab", buffering=0)
 
 
@@ -82,7 +87,8 @@ def spawn(root: Path, arguments: list[str], logfile: str):
     environment.update(AZUSA_ROOT=str(root), PYTHONPATH=str(root / "src"))
     with private_log(root, logfile) as output:
         return subprocess.Popen(arguments, cwd=root, env=environment,
-            stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True)
+            stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True,
+            **({'creationflags':subprocess.CREATE_NO_WINDOW} if os.name=='nt' else {}))
 
 
 def wait_ready(check, child=None, timeout=35):
@@ -102,7 +108,7 @@ def ensure_core(root: Path):
         return
     if port_open(runtime_layout(root).core_port):
         raise RuntimeError("管理端口已被其他服务占用；没有停止任何程序。请检查本机管理服务。")
-    child = spawn(root, [str(root / ".venv/bin/python"), "-m", "azusa_bot.cli", "serve"], "core.log")
+    child = spawn(root, [str(python_at(root / ".venv")), "-m", "azusa_bot.cli", "serve"], "core.log")
     private_write(root / "data/core.pid", str(child.pid))
     if not wait_ready(lambda: core_ready(root), child):
         raise RuntimeError("管理服务尚未就绪，请检查 data/core.log。没有停止其他程序。")
@@ -127,9 +133,9 @@ def ensure_bridge(root: Path):
     if not source_file.is_file():
         raise RuntimeError("桥接环境尚未准备，请先完成项目的安装步骤。")
     source = Path(source_file.read_text().strip())
-    if not (source / ".venv/bin/python").is_file():
+    if not (python_at(source / ".venv")).is_file():
         raise RuntimeError("桥接运行环境不可用，请检查项目安装。")
-    child = spawn(root, ["/bin/sh", str(root / "scripts/run_onebot_astrbot.sh")], "onebot-launch.log")
+    child = spawn(root, [str(python_at(source / ".venv")), str(root / "scripts/run_onebot_astrbot.py")], "onebot-launch.log")
     private_write(root / "data/onebot-launch.pid", str(child.pid))
     if not wait_ready(ready, child, timeout=45):
         raise RuntimeError("普通 QQ 桥接尚未就绪，请检查 data/onebot-launch.log；不会自动重启。")
@@ -157,6 +163,11 @@ def open_management(root: Path):
     value = token(root, "admin")
     if not re.fullmatch(r"[A-Za-z0-9_-]{32,}", value):
         raise RuntimeError("本机管理口令格式异常，请检查安全配置。")
+    if platform.system() != 'Darwin':
+        webbrowser.open(runtime_layout(root).core_url)
+        print('Management is ready. Open data/admin.token locally and paste it into the page; do not share it.')
+        if os.name == 'nt':os.startfile(str(root / 'data/admin.token'))
+        return
     # Pass the private URL through stdin, not process arguments or terminal text.
     try:
         result = subprocess.run(["/usr/bin/osascript", "-"],
@@ -170,11 +181,15 @@ def open_management(root: Path):
 
 
 def start_vm(root: Path):
+    from azusa_bot.external_runtime import enabled
+    if enabled(root):
+        print('Native NapCat is managed separately. See the connection page.',flush=True)
+        return
     if not vm_prepared(root):
         print("隔离 QQ 环境尚未准备完成。已打开管理页；此入口不会下载或安装虚拟机。", flush=True)
         return
     print("正在启动已准备的隔离 QQ 环境…", flush=True)
-    child = spawn(root, [str(root / ".venv/bin/python"), str(root / "scripts/napcat_runtime.py"), "start"], "napcat-launch.log")
+    child = spawn(root, [str(python_at(root / ".venv")), str(root / "scripts/napcat_runtime.py"), "start"], "napcat-launch.log")
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         status = child.poll()

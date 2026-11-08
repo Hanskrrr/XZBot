@@ -1,0 +1,64 @@
+# XZBot 0.9 原生发行版
+
+本版为 Release Candidate。三端共用同一业务核心和网页管理界面；Windows 无需 WSL。
+发布包只包含程序、示例、固定版本 uv 启动工具与许可证，不含任何个人凭据、角色资料、历史或 QQ 会话。
+
+## 下载与启动
+
+解压到自己的固定目录，不要在压缩包内直接运行。首次启动需要网络下载 Python 3.12 和锁定依赖，之后复用本地环境。
+
+| 系统 | 入口 | QQ 环境 |
+|---|---|---|
+| Windows x64 | 双击 `Start-XZBot.cmd` | 单独安装原生 NapCat / QQ；不使用 WSL 或 Lima |
+| macOS Apple Silicon | 双击 `Start-XZBot.command` | 既有 Lima 路径；首次需安装 Homebrew、Lima 并准备 QQ 环境 |
+| Linux x64 | `sh Start-XZBot.sh` | 单独安装原生 NapCat / QQ；服务器可通过 SSH 隧道访问 |
+
+首次启动时有依赖安装进度，完成后打开 http://127.0.0.1:6196 。
+Windows 会在本机打开 `data/admin.token`，将其中口令粘贴到管理页；不要发给别人。
+Mac 原有启动入口自动连接；Linux 服务器在本机查看该文件，通过 SSH 隧道连接管理页。
+关闭网页不会停止服务；关闭 Bot 使用界面上方的电源按钮。
+
+此发行包不是签名的 MSI/DMG，也不内置 QQ、NapCat 或 AI 推理模型。Windows 采用原生 Python 进程，`cmd` 只是双击入口。首次安装后不要移动目录中的虚拟环境；迁移到新目录时重建环境。
+
+## Windows / Linux 连接原生 NapCat
+
+1. 按 [NapCat 官方说明](https://napneko.github.io/guide/boot/Shell)安装对应系统与 CPU 架构的 NapCat，退出它后配置。
+2. 在 XZBot「连接与权限」展开「Windows / Linux 原生 NapCat 连接配置」，下载当前账号的配置包，解压到 NapCat 的 `config` 目录。
+3. 如果已有 `onebot11_QQ号.json`，其中账号专属设置优先于通用 `onebot11.json`，将下载配置中的 `network.websocketClients` 同步到账号专属文件，或先备份再移走旧账号专属配置。不要保留旧的额外消息连接。
+4. 启动 NapCat。XZBot 默认连接本机 NapCat WebUI 6200，反向 WebSocket 6199；两者都只绑定回环地址。
+5. 在 XZBot 管理页扫码登录、采用登录账号，然后配置 owner、白名单、模型/API key 和语音。
+
+原生外部模式下，XZBot 的电源按钮暂停/恢复业务与自己的桥接。**它不终止外部 NapCat/QQ 进程**；退出该程序由 NapCat 自己管理。停 Bot 并不意味着已释放 QQ 进程内存。
+多账号使用独立 NapCat 实例和独立配置；每个账号都从自己的管理页下载连接配置，不共用登录目录。
+
+## Mac 首次准备
+
+先安装 `brew install lima`。首次安装完成后，在项目目录运行：
+
+```sh
+.venv/bin/python scripts/napcat_runtime.py setup
+```
+
+该操作会下载固定版本 NapCat 与独立 Linux 运行环境。之后用 `Start-XZBot.command` 或安装已有 XZBot.app 桌面入口。
+已有 Mac 项目升级只同步清理后的源码，再运行安装入口；保留本机数据和钥匙串，不能拿公开包覆盖个人配置。
+
+## 凭据与数据
+
+- macOS 使用系统钥匙串，Windows 使用 Windows 凭据管理器。
+- Linux 首次安装显式建立仅本机账号可访问的私有文件凭据后端；这是文件权限保护，不声称磁盘加密。
+- 所有平台的 `data/`、`config/local.json`、`content/` 和 `accounts/` 均不进入公开仓库或 Release。
+- API key 在管理页输入。NapCat 连接配置包含本机访问令牌，不要上传 GitHub。
+- 不要将同一个 QQ 同时放在两套 Bot 中运行。更新前使用管理页备份；Linux 或 Windows 不直接使用 Mac 虚拟环境/钥匙串。
+
+## 本版新增
+
+「群聊参与 → 冷场发言 → 立即发起一次聊天」向当前选中的群生成并发送一次文字开场，使用当前角色。
+它跳过自动冷场等待、时段、自动参与额度和评分，但仍受 Bot 总开关、白名单、QQ 通道、云端总额度约束。
+相同请求不会重发；角色、权限或群聊上下文在生成期间变化会取消旧稿。
+结果和引用资料可在「调用轨迹 → 手动发起群聊」查看；额外提示词在角色的可编辑提示词中。
+
+## 验证边界
+
+GitHub Actions 分别在 Windows、macOS、Linux 安装依赖，测试原生文件锁/权限、管理 API、记忆与手动发言机制，并启动真实固定版本 AstrBot 桥接。
+CI 不登录 QQ，也不使用任何真实模型密钥。Mac 现有 QQ 环境可本机验证；Windows/Linux 的实际扫码、腾讯收发、语音和订阅媒体需要在目标机器验收。
+可选 Gemini Balance 仍需目标平台安装其 Git 和依赖；发布测试不等于已经验证它在每个系统上运行。

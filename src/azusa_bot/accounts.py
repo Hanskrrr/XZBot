@@ -1,15 +1,19 @@
 """Independent QQ instances sharing installed code, never login/runtime data."""
 from __future__ import annotations
+from .host import python_at
+from .host import private_info, private_path, protect, link_directory
+from .host import safe_open, NOFOLLOW
 
 import asyncio
 from contextlib import contextmanager
-import fcntl
+from .host import file_locks as fcntl
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import signal
+from .native_process import terminate_helper
 import threading
 import time
 import uuid
@@ -56,7 +60,7 @@ class AccountRegistry:
         if not self.path.exists() and not self.path.is_symlink():
             return []
         try:
-            if self.path.is_symlink() or self.path.stat().st_size > 65536 or self.path.stat().st_mode & 0o077:
+            if self.path.is_symlink() or self.path.stat().st_size > 65536 or not private_path(self.path):
                 raise ValueError()
             data = json.loads(self.path.read_text())
             rows = data["accounts"]
@@ -80,7 +84,7 @@ class AccountRegistry:
     def transaction(self):
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with self.lock:
-            descriptor = os.open(self.path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            descriptor = safe_open(self.path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR | NOFOLLOW, 0o600)
             with os.fdopen(descriptor, "a") as stream:
                 fcntl.flock(stream, fcntl.LOCK_EX)
                 yield
@@ -285,6 +289,8 @@ class AccountManager:
             directory.mkdir(parents=True, mode=0o700)
             try:
                 private_write(directory / "config/instance.json", json.dumps({"schema": 1, "slot": slot, "manager_root": str(self.root)}))
+                from .external_runtime import enabled as external_runtime
+                if external_runtime(self.root):private_write(directory/'config/runtime.json',json.dumps({'mode':'external'}))
                 _copy_content(source.directory(profile["id"]) / "content", directory / "content")
                 original = read_settings(self.root)
                 values = original.model_dump() | {"transport": "onebot", "app_id": "", "allowed_groups": [],
@@ -298,7 +304,7 @@ class AccountManager:
                 for filename in ("src", "scripts", "ui", ".venv", "astrbot_plugin_azusa_onebot", "astrbot_plugin_azusa_bridge"):
                     target = self.root / filename
                     if target.exists():
-                        (directory / filename).symlink_to(target, target_is_directory=True)
+                        link_directory(directory / filename,target)
                 # Reuse installed code, never the primary AstrBot data/config.
                 for filename in ("astrbot-source.path", "keychain-service"):
                     path = self.root / "data" / filename
@@ -311,7 +317,7 @@ class AccountManager:
                 for filename in ("downloads", "gemini-balance", "gemini-balance-venv"):
                     target = self.root / "runtime" / filename
                     if target.is_dir():
-                        (directory / "runtime" / filename).symlink_to(target, target_is_directory=True)
+                        link_directory(directory / 'runtime' / filename,target)
                 for purpose in ("admin", "bridge", "onebot"):
                     token(directory, purpose)
                 entry = {"id": number, "name": name.strip(), "slot": slot}
@@ -343,7 +349,7 @@ class AccountManager:
         if action not in {"open", "ensure-core", "prepare"}:
             raise AccountError("account_operation_invalid")
         script = root / "scripts/account_instance_action.py"
-        python = root / ".venv/bin/python"
+        python = python_at(root / ".venv")
         if not script.is_file() or not python.is_file():
             raise AccountError("account_runtime_unavailable")
         environment = os.environ.copy()
@@ -355,14 +361,14 @@ class AccountManager:
             result = await asyncio.wait_for(process.wait(), timeout=1200 if action == "prepare" else 60)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             try:
-                os.killpg(process.pid, signal.SIGTERM)
+                terminate_helper(process)
             except ProcessLookupError:
                 pass
             try:
                 await asyncio.wait_for(process.wait(), 5)
             except asyncio.TimeoutError:
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    terminate_helper(process,force=True)
                 except ProcessLookupError:
                     pass
                 await process.wait()

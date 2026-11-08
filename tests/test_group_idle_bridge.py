@@ -69,4 +69,21 @@ def test_idle_task_stops_on_bridge_termination(monkeypatch):
         await bridge.initialize();await asyncio.sleep(0)
         task=bridge._idle_task
         await bridge.terminate();assert task.done()
-    asyncio.run(go());assert not calls
+    asyncio.run(go());assert not [p for p,b in calls if '/idle/' in p]
+
+
+def test_manual_send_works_with_automatic_participation_disabled(monkeypatch):
+    bridge,bot,calls=fixture(monkeypatch)
+    bridge.config.update(group_chat_enabled=False,group_idle_enabled=False,group_idle_groups=[])
+    async def handler(request):
+        body=json.loads(request.content);calls.append((request.url.path,body))
+        if request.url.path.endswith('manual-claim'):return httpx.Response(200,json={'messages':[{**ITEM,'manual':True}]})
+        if request.url.path.endswith('authorize'):return httpx.Response(200,json={'allowed':True})
+        return httpx.Response(200,json={'acknowledged':True})
+    async def go():
+        await bridge.client.aclose();bridge.client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:await bridge._idle_tick(manual=True)
+        finally:await bridge.terminate()
+    asyncio.run(go())
+    assert len(bot.calls)==1
+    assert calls[-1][1]['status']=='sent'

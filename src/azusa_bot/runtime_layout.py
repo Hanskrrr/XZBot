@@ -5,6 +5,8 @@ settings cannot supply arbitrary ports, hosts, commands or external directories.
 The original project keeps every legacy port and runtime path.
 """
 from __future__ import annotations
+from .host import private_info, private_path, protect, link_directory
+from .host import safe_open, NOFOLLOW
 
 from dataclasses import dataclass
 import json
@@ -74,10 +76,10 @@ def runtime_layout(root: Path) -> RuntimeLayout:
     try:
         if root.is_symlink() or root.parent.is_symlink() or (root / "config").is_symlink():
             raise ValueError()
-        descriptor = os.open(manifest, os.O_RDONLY | os.O_NOFOLLOW)
+        descriptor = safe_open(manifest, os.O_RDONLY | NOFOLLOW)
         with os.fdopen(descriptor) as stream:
             info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 4096 or info.st_mode & 0o077:
+            if not stat.S_ISREG(info.st_mode) or not private_info(info,stream.fileno()) or info.st_size > 4096:
                 raise ValueError()
             data = json.load(stream)
         if (not isinstance(data, dict) or set(data) != {"schema", "slot", "manager_root"}

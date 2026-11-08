@@ -18,7 +18,7 @@ def main():
     os.umask(0o077)
     root = root_path()
     if args.command == "serve":
-        import fcntl
+        from .host import file_locks as fcntl
         import logging
         import uvicorn
         from .app import create_app

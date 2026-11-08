@@ -83,7 +83,7 @@ def _write_image(path, image, *, max_bytes=None):
 
 def _font(size):
     for path in ("/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/STHeiti Light.ttc",
-                 "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"):
+                 "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "C:/Windows/Fonts/msyh.ttc"):
         if Path(path).is_file():
             return ImageFont.truetype(path, size)
     return ImageFont.load_default(size=size)

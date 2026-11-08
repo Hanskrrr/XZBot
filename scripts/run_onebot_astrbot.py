@@ -1,7 +1,6 @@
 """OneBot receiver only: no official QQ credentials or other adapters are loaded."""
 import copy
 import errno
-import fcntl
 import os
 from pathlib import Path
 import runpy
@@ -9,6 +8,7 @@ import socket
 import sys
 
 from prepare_onebot import ROOT, prepare
+from azusa_bot.host import file_locks as fcntl
 from azusa_bot.runtime_layout import runtime_layout
 
 layout = runtime_layout(ROOT)

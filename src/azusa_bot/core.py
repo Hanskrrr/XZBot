@@ -194,6 +194,8 @@ class Engine:
         data = self.content_root / "data"
         data.mkdir(parents=True, exist_ok=True, mode=0o700)
         data.chmod(0o700)
+        from .host import protect
+        protect(data)
         self.memory = MemoryStore(data / "memory.sqlite3")
         self.trajectories = self.memory.trajectories
         (root / "data").mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -372,7 +374,7 @@ class Engine:
 
     async def _complete_traced(self,provider,messages,settings,**kwargs):
         kind=kwargs["kind"]
-        if kind=='group_idle':
+        if kind in {'group_idle','group_idle_manual'}:
             from .role_activity import augment
             messages=augment(self,messages,settings,kwargs)
         if kind not in {"reply","group_decision","followup"}:
@@ -438,7 +440,7 @@ class Engine:
                                execution=None):
         generation = self.generation(scope) if context_generation is None else context_generation
         config = conversation_config.read(self.content_root)
-        example_messages = conversation_config.examples(config) if kind in {"reply", "group_decision", "followup", "group_idle"} else []
+        example_messages = conversation_config.examples(config) if kind in {"reply", "group_decision", "followup", "group_idle", "group_idle_manual"} else []
         example_tokens = estimate_tokens(example_messages) - 256
         if example_messages:
             messages = copy.deepcopy(messages)

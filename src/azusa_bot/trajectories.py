@@ -23,7 +23,7 @@ from .web_search import public_url, public_query
 from .group_topic import safe_topic
 from .providers import ProviderError
 
-KINDS = {"reply", "group_idle", "group_decision", "followup", "summary", "tts", "web_search", "group_topic"}
+KINDS = {"reply", "group_idle", "group_idle_manual", "group_decision", "followup", "summary", "tts", "web_search", "group_topic"}
 TRIGGERS = {"direct", "group_observation", "followup", "automatic", "background", "manual"}
 STATUSES = {"running", "success", "failed", "saved", "no_facts", "superseded",
             "interrupted", "invalid_output", "cloud_budget", "cloud_backoff", "profile_changed", "research_requested", "topic_blocked"}
@@ -405,6 +405,7 @@ class TrajectoryStore:
         row["provider_called"] = bool(row["provider_called"])
         row["source_event_id"] = refs.get("source_event_id", "")
         key = refs.get("delivery_event_key")
+        row["idle_attempt_id"] = refs.get("idle_attempt_id")
         row["delivery_event_key"] = key if isinstance(key,str) and re.fullmatch(r"[a-f0-9]{64}",key) else None
         row["context_budget"] = refs.get("context_budget")
         row["request_layout"] = refs.get("request_layout")

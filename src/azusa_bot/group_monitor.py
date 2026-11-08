@@ -10,7 +10,7 @@ def snapshot(engine,scope):
     with engine.ledger.db() as db:
         row=db.execute('SELECT last_at,version,attempted FROM group_idle_rooms WHERE scope=? AND profile_id=?',
                        (scope,engine.profile_id)).fetchone()
-        count=db.execute('SELECT COUNT(*) FROM group_idle_attempts WHERE scope=? AND at>=?',
+        count=db.execute("SELECT COUNT(*) FROM group_idle_attempts WHERE scope=? AND at>=? AND source='automatic'",
                          (scope,engine.idle._day_start())).fetchone()[0]
         # Reuse existing outcome metadata. No new transcript, prompt or paid
         # request is created by opening the monitor. The shared ledger must be

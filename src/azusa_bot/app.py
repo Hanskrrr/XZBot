@@ -703,9 +703,51 @@ def create_app(root: Path | None = None) -> FastAPI:
         body=await json_object(request)
         return {"notifications":subscriptions.fetch_claim(body.get("self_id"),limit=1)}
 
+    @app.get("/admin/runtime/external", dependencies=[Depends(admin)])
+    def external_runtime_status():
+        from .external_runtime import enabled
+        return {"external":enabled(root),"onebot_port":layout.onebot_port,"napcat_port":layout.napcat_port}
+
+    @app.get("/admin/runtime/external/config", dependencies=[Depends(admin)])
+    def external_runtime_config():
+        from .external_runtime import enabled, connection_archive
+        if not enabled(root):raise HTTPException(409,"runtime_not_external")
+        return Response(connection_archive(root),media_type='application/zip',headers={
+            'Content-Disposition':'attachment; filename="xzbot-napcat-private-config.zip"','Cache-Control':'no-store'})
+
     @app.get("/admin/groups/idle/status", dependencies=[Depends(admin)])
     def idle_status():
         return engine.idle.status()
+
+    @app.post("/admin/groups/idle/trigger", dependencies=[Depends(admin)])
+    async def trigger_idle(request: Request):
+        body = await json_object(request)
+        if (set(body) != {"scope", "request_id"} or not isinstance(body.get("scope"), str)
+                or not re.fullmatch(r"[a-f0-9]{32}", str(body.get("request_id", "")))):
+            raise HTTPException(400, "invalid_idle_request")
+        if qq_connection.snapshot()["online"] is not True:
+            raise HTTPException(409, "manual_idle_offline")
+        try:
+            return engine.idle.queue_manual(body["scope"], body["request_id"])
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from None
+
+    @app.get("/admin/groups/idle/requests/{number}", dependencies=[Depends(admin)])
+    def manual_idle_status(number: str):
+        if not re.fullmatch(r"[a-f0-9]{32}", number):
+            raise HTTPException(400, "invalid_idle_request")
+        row = engine.idle.manual_status(number)
+        if row is None:
+            raise HTTPException(404, "manual_idle_not_found")
+        return row
+
+    @app.post("/bridge/idle/manual-claim", dependencies=[Depends(bridge)])
+    async def manual_idle_claim(request: Request):
+        body = await json_object(request)
+        if set(body) != {"self_id"} or not isinstance(body.get("self_id"), str):
+            raise HTTPException(400, "invalid_idle_request")
+        with engine.pin() as current:
+            return {"messages": await current.idle.claim_manual(body["self_id"])}
 
     @app.post("/bridge/idle/claim", dependencies=[Depends(bridge)])
     async def idle_claim(request: Request):

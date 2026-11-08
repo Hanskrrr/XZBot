@@ -5,15 +5,15 @@ This contract is prompt-visible and traceable; local gates remain authoritative.
 """
 from . import participation_vote
 
-CHAT_KINDS = frozenset({'reply', 'group_decision', 'followup', 'group_idle'})
+CHAT_KINDS = frozenset({'reply', 'group_decision', 'followup', 'group_idle', 'group_idle_manual'})
 
 
 def build(settings, kind, *, tools=()):
     if kind not in CHAT_KINDS:
         return None
     score = {'type':'number', 'minimum':0, 'maximum':1}
-    modes = ['text'] if kind == 'group_idle' else ['text', 'image']
-    if kind != 'group_idle' and settings.voice_enabled and settings.voice_authorized:
+    modes = ['text'] if kind in {'group_idle','group_idle_manual'} else ['text', 'image']
+    if kind not in {'group_idle','group_idle_manual'} and settings.voice_enabled and settings.voice_authorized:
         modes.append('voice')
     properties = {'text':{'type':'string'}, 'mode':{'enum':modes}}
     required = ['text', 'mode']
@@ -27,7 +27,7 @@ def build(settings, kind, *, tools=()):
     if kind == 'followup':
         properties['continuation'] = {'type':'boolean'}
         required.append('continuation')
-    if kind != 'group_idle':
+    if kind not in {'group_idle','group_idle_manual'}:
         for key in tools:
             properties[key] = {'type':'object'} if key == 'web_search' else {'type':'string'}
         properties.update(asset_id={'type':'string'}, citations={'type':'array','items':{'type':'integer'}})
