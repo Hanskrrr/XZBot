@@ -10,7 +10,7 @@ from .settings import read_settings, private_write
 
 LABELS = {
     'online':'QQ 接口报告在线，消息通道已连接；这不保证腾讯端实际收发正常', 'qq_offline':'QQ 已离线',
-    'delivery_degraded':'QQ 接口仍报告在线，但最近连续发送未获确认；可能是假在线、网络或发送限制，需要检查真实收发',
+    'delivery_degraded':'QQ 接口报告在线，但最近连续发送未取得可靠回执；消息可能已经送达，请在 QQ 核对。此状态不等于已离线或被风控',
     'login_required':'QQ 需要登录', 'login_initializing':'QQ 登录正在初始化',
     'reconnecting':'QQ 正在重连', 'status_incomplete':'QQ 状态无法确认',
     'napcat_unavailable':'暂时无法读取 QQ 环境状态', 'bridge_stale':'消息通道状态已过期，无法确认在线',

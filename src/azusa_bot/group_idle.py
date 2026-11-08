@@ -56,6 +56,8 @@ class IdleConversation:
             """)
             if 'source' not in {row[1] for row in db.execute('PRAGMA table_info(group_idle_attempts)')}:
                 db.execute("ALTER TABLE group_idle_attempts ADD COLUMN source TEXT NOT NULL DEFAULT 'automatic'")
+            if 'error_code' not in {row[1] for row in db.execute('PRAGMA table_info(group_idle_attempts)')}:
+                db.execute("ALTER TABLE group_idle_attempts ADD COLUMN error_code TEXT NOT NULL DEFAULT ''")
         # Restart/switch requires fresh human activity; it cannot replay a draft
         # or turn an old quiet group into an immediate unsolicited greeting.
         self.invalidate()
@@ -124,13 +126,13 @@ class IdleConversation:
             if item['scope'] == scope:
                 self._finish(number, 'cancelled')
 
-    def _finish(self, number, status):
+    def _finish(self, number, status, error_code=''):
         item = self.pending.pop(number, None)
         if item:
             self.engine.discard_generated_media(item)
         self.manual_requests.pop(number, None)
         with self.engine.ledger.db() as db:
-            db.execute('UPDATE group_idle_attempts SET status=? WHERE id=?', (status, number))
+            db.execute('UPDATE group_idle_attempts SET status=?,error_code=? WHERE id=?', (status, error_code, number))
 
     def _day_start(self):
         return datetime.fromtimestamp(self.clock(), CST).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
@@ -266,14 +268,15 @@ class IdleConversation:
             self._finish(number, 'interrupted')
             raise
         except Exception as error:
+            from .diagnostics import safe_code
             if isinstance(error, ProviderError):
                 engine.provider_failure(error, settings)
-            self._finish(number, 'failed')
+            self._finish(number, 'failed', safe_code(error) if isinstance(error, ProviderError) else 'internal_failure')
             return []
     def manual_status(self, number):
         with self.engine.ledger.db() as db:
             self._prune(db)
-            row = db.execute("SELECT id,scope,status,at FROM group_idle_attempts WHERE id=? AND profile_id=? AND source='manual'", (number,self.engine.profile_id)).fetchone()
+            row = db.execute("SELECT id,scope,status,at,error_code FROM group_idle_attempts WHERE id=? AND profile_id=? AND source='manual'", (number,self.engine.profile_id)).fetchone()
         return dict(row) if row else None
 
     def queue_manual(self, scope, number):
@@ -324,7 +327,7 @@ class IdleConversation:
             db.execute("UPDATE group_idle_attempts SET status='authorized' WHERE id=?", (number,))
         return True
 
-    def ack(self, number, token, self_id, status, message_id=None):
+    def ack(self, number, token, self_id, status, message_id=None, error_code=None):
         item = self.pending.get(number) if isinstance(number,str) else None
         if (not isinstance(status,str) or status not in {'sent','failed','uncertain'} or not item or not isinstance(token,str)
                 or not re.fullmatch(r'[a-f0-9]{32}',token) or not secrets.compare_digest(item['claim_token'], token) or item['self_id'] != self_id):
@@ -333,7 +336,8 @@ class IdleConversation:
         if status == 'sent' and (item['status'] != 'authorized' or not isinstance(message_id,str)
                 or not re.fullmatch(r'-?[0-9]{1,20}', message_id)):
             return {'acknowledged':False}
-        self._finish(number, status)
+        from .delivery_errors import safe_delivery_code
+        self._finish(number, status, safe_delivery_code(error_code) if error_code is not None and status != 'sent' else '')
         if status == 'sent' and valid:
             if item.get('reservation'):
                 self.engine.groups.mark_sent(item['reservation'])

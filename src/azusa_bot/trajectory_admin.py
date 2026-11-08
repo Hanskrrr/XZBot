@@ -22,10 +22,12 @@ def attach_delivery(current, rows):
         idle_id = row.pop('idle_attempt_id', None)
         if row['kind'] in {'group_idle','group_idle_manual'} and isinstance(idle_id,str) and re.fullmatch(r'[a-f0-9]{32}',idle_id):
             with current.ledger.db() as db:
-                attempt = db.execute('SELECT status FROM group_idle_attempts WHERE id=? AND scope=? AND profile_id=?', (idle_id,row['scope'],current.profile_id)).fetchone()
+                attempt = db.execute('SELECT status,error_code FROM group_idle_attempts WHERE id=? AND scope=? AND profile_id=?', (idle_id,row['scope'],current.profile_id)).fetchone()
             if attempt:
                 status=attempt['status']
                 row['delivery']={'state': 'sent' if status=='sent' else 'uncertain' if status=='uncertain' else 'pending' if status in {'queued','generating','prepared','authorized'} else 'not_sent','status':status,'mode':'text'}
+                if attempt['error_code']:
+                    row['delivery']['error_code'] = attempt['error_code']
                 continue
         event = row.get("source_event_id")
         if key is None and isinstance(event,str) and re.fullmatch(r"-?[0-9]{1,20}",event):

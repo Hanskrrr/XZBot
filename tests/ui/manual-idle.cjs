@@ -7,7 +7,7 @@ const {execFileSync}=require('node:child_process');const root=path.resolve(__dir
  const a='onebot:10001:group:30001',b='onebot:10001:group:30002';let active='default',presets=[],revision=0,delay=false,release=null;
  const policy=Object.fromEntries(Object.entries(settings).filter(([k])=>/^group_/.test(k)&&k!=='group_idle_groups'));
  const policies={[a]:{...policy,group_chat_enabled:true,group_heat_enabled:true,group_idle_enabled:true,group_vote_enabled:true,group_vote_weight_understanding:70},[b]:{...policy,group_heat_enabled:false}};
- const calls=[],errors=[];let stamp=Date.now()/1000;
+ const calls=[],errors=[];let stamp=Date.now()/1000,receiptState='sent',cloudLimit=200;
  const monitor=(scope,profile)=>({scope,profile_id:profile,observed_at:stamp,running:true,participation_enabled:true,
   idle:{state:'waiting',last_activity_at:stamp-(scope===a?900:120),elapsed_seconds:scope===a?900:120,threshold_seconds:1800,progress:scope===a?.5:1/15,remaining_seconds:900,attempts_today:1,daily_limit:3,hours_start:9,hours_end:23},
   heat:{enabled:true,hot:false,eligible:false,window_seconds:90,messages:scope===a?6:2,required_messages:8,members:3,required_members:3,progress:scope===a?.75:.25,replies_used:1,replies_limit:3},
@@ -18,7 +18,9 @@ const {execFileSync}=require('node:child_process');const root=path.resolve(__dir
  await page.route('**/*',async route=>{const req=route.request(),u=new URL(req.url()),method=req.method(),body=req.postDataJSON(),profile=req.headers()['x-xzbot-profile'];calls.push({path:u.pathname,method,body,profile,url:u.href});assert.equal(u.origin,'http://xzbot.test');let result={};
   if(u.pathname==='/'){await route.fulfill({contentType:'text/html',body:fs.readFileSync(path.join(root,'ui/index.html'),'utf8')});return;}
   if(u.pathname==='/admin/groups/idle/trigger')result={id:body.request_id,scope:body.scope,status:'queued'};
-  else if(u.pathname.startsWith('/admin/groups/idle/requests/'))result={status:'sent'};
+  else if(u.pathname.startsWith('/admin/groups/idle/requests/'))result={status:receiptState,...(receiptState==='uncertain'?{error_code:'send_timeout'}:{})};
+  else if(u.pathname==='/admin/cloud-budget'){if(method==='PUT')cloudLimit=body.daily_cloud_requests;result={limit:cloudLimit,used:200,remaining:Math.max(0,cloudLimit-200),resets_at:1794182400};}
+  else if(u.pathname==='/admin/providers')result={settings,credentials:{}};
   else if(u.pathname==='/admin/status')result={settings,credentials:{},stats:{},version:'offline'};
   else if(u.pathname==='/admin/settings')result=settings;
   else if(u.pathname==='/admin/profiles')result={active_id:active,profiles:[{id:'default',name:'测试角色',voice:{}},{id:'other',name:'另一角色',voice:{}}]};
@@ -55,7 +57,15 @@ const {execFileSync}=require('node:child_process');const root=path.resolve(__dir
  const triggers=calls.filter(c=>c.path==='/admin/groups/idle/trigger');assert.equal(triggers.length,1);assert.equal(triggers[0].body.scope,a);assert.equal(triggers[0].profile,'default');assert.match(triggers[0].body.request_id,/^[a-f0-9]{32}$/);
  assert.equal(calls.filter(c=>c.path==='/admin/group-settings'&&c.method==='PUT').length,0);
  await page.locator('#trigger-idle-now').screenshot({path:'/tmp/xzbot-manual-idle-button.png'});
+ receiptState='uncertain';await page.locator('#trigger-idle-now').click();await wait('manual-idle-state','send_timeout');assert.match(await page.locator('#manual-idle-state').innerText(),/可能已经送达/);
+ await page.locator('[data-tab="providers"]').click();await wait('providers-state','已载入');await page.locator('#providers-view-budget').click();await wait('cloud-budget-usage','200 / 200');
+ assert.equal(await page.locator('#daily-cloud-requests').inputValue(),'200');assert.equal(calls.filter(c=>c.path==='/admin/cloud-budget'&&c.method==='PUT').length,0);
+ await page.locator('#daily-cloud-requests').fill('400');await page.locator('#cloud-budget-form button[type=submit]').click();await wait('cloud-budget-state','已保存');await wait('cloud-budget-usage','200 / 400');assert.equal(cloudLimit,400);
+ await page.locator('#daily-cloud-requests').fill('0');await page.locator('#cloud-budget-form button[type=submit]').click();await wait('cloud-budget-state','1 到 10,000');assert.equal(calls.filter(c=>c.path==='/admin/cloud-budget'&&c.method==='PUT').length,1);
+ await page.locator('#refresh-cloud-budget').click();await wait('cloud-budget-state','已读取');assert.equal(await page.locator('#daily-cloud-requests').inputValue(),'400');
+ await page.locator('#cloud-budget-panel').screenshot({path:'/tmp/xzbot-cloud-budget.png'});
+
  await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
- assert.deepEqual(errors,[]);console.log(JSON.stringify({manual_idle:true,correct_scope:true,receipt_shown:true,mobile:true,live_messages_sent:0}));
+ assert.deepEqual(errors,[]);console.log(JSON.stringify({manual_idle:true,correct_scope:true,receipt_shown:true,uncertainty_explained:true,cloud_budget_saved:true,mobile:true,live_messages_sent:0}));
  }finally{await browser.close();}
 })().catch(e=>{console.error('Manual idle UI failed: '+step+': '+e.stack);process.exitCode=1;});

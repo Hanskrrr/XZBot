@@ -62,7 +62,7 @@ def explanation(code):
     if code.endswith(('_400','_404','_422')):return '服务拒绝模型名称、地址或请求参数，请检查所选模型的接口兼容性。'
     if 'not_configured' in code:return '尚未配置所需密钥、模型或音色，请到模型与语音补齐。'
     if code=='credential_store_unavailable':return '系统钥匙串暂不可访问，请检查系统授权。'
-    if code in {'cloud_budget','voice_budget_exhausted'}:return '本地每日云端调用额度已用完，可在设置中调整。'
+    if code in {'cloud_budget','voice_budget_exhausted'}:return 'XZBot 本地每日调用次数已达上限，请到「模型与语音 → 调用额度」查看用量或调整。这不是 API 账户余额；北京时间每天 8 点重置。'
     if 'network' in code:return '连接失败或响应格式不符合要求；检查网络与模型兼容性。'
     if code in {'deepseek_incomplete','gemini_balance_incomplete','invalid_reply_object','empty_reply','summary_invalid'}:return '模型未返回完整且符合约定的内容；没有将错误提示发送到聊天。'
     return '处理未完成，技术详情仅保存在本机；聊天中不会发送故障占位句。'

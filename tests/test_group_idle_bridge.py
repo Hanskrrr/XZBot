@@ -62,6 +62,9 @@ def test_send_uncertainty_or_ack_failure_never_retries(monkeypatch,fail,receipt,
     bridge,bot,calls=fixture(monkeypatch,fail=fail,receipt=receipt,ack_fail=ack_fail);run(bridge)
     assert len(bot.calls)==1
     assert len([b for p,b in calls if p.endswith('/ack')])==1
+    if not receipt:
+        ack=next(b for p,b in calls if p.endswith('/ack'))
+        assert ack['status']=='uncertain' and ack['error_code']=='missing_receipt'
 
 def test_idle_task_stops_on_bridge_termination(monkeypatch):
     bridge,_,calls=fixture(monkeypatch,online=False)

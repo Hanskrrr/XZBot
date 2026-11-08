@@ -216,6 +216,14 @@
       <div class="panel" style="margin-top:20px"><h3>当前角色的 Fish Audio 音色</h3><p class="hint">音色、语音开关和授权确认分别保存在每个 Profile 中；Fish Audio API 密钥由本机项目内的所有 QQ 账号共用；修改或删除会影响这些账号。</p><div class="fields"><div><label for="fish-model">Fish Audio 模型</label><input id="fish-model" maxlength="160" autocomplete="off" placeholder="读取当前模型配置"></div><div><label for="fish-reference-id">音色 Reference / Model ID</label><input id="fish-reference-id" maxlength="200" autocomplete="off" placeholder="从你的 Fish Audio 音色页面复制 ID"></div><div class="full"><label for="fish-key">更新 Fish Audio API 密钥</label><input id="fish-key" type="password" autocomplete="new-password" placeholder="留空保留现有密钥"></div></div><p id="fish-key-status" class="hint"></p><label><input id="clear-fish-key" type="checkbox"> 删除钥匙串中保存的 Fish Audio 密钥</label><p id="fish-effective" class="hint" style="overflow-wrap:anywhere"></p><div class="separated"><label><input id="provider-voice-enabled" type="checkbox"> 允许角色按内容选择语音</label><label style="margin-top:10px"><input id="provider-voice-authorized" type="checkbox"> 我确认拥有当前音色的使用权限</label><p class="hint">音色 ID 不是 API 密钥，也不代表授权。未启用或未确认使用权限时保持文字回复。</p></div></div>
       <div class="panel" style="margin-top:20px"><h3>凭据来源</h3><label><input id="provider-read-dsh" type="checkbox"> 允许从已有 DSH 配置读取凭据作为后备</label><p class="hint">读取顺序：环境变量 → 本机凭据存储 → 已启用的 DSH 后备。如果当前来源是环境变量，本页保存的新密钥不会覆盖它，需要另外调整该环境变量。删除钥匙串条目后后备来源可能仍然有效；本页不修改 DSH 文件。</p><p id="provider-storage" class="hint">本机密钥存储：macOS Keychain</p><div class="notice warm">云端模式会把人设、当前消息和相关上下文送到所选服务；生成语音还会调用 Fish Audio，并可能产生费用。更改模型或地址后先在测试空间检查。</div><div class="toolbar"><button type="submit" class="primary">保存模型与语音</button><button type="button" id="reload-providers" class="quiet">重新载入</button><span id="providers-state" class="status-message" role="status"></span></div><p class="hint footer-note">密钥输入框每次提交后都会清空，无论成功或失败。留空表示保留；兼容接口的删除操作仅针对当前填写的基础地址。备份不携带密钥，项目搬家或换 Mac 后需要重新填写。</p></div>
     </form>
+    <div class="panel" style="margin-top:20px" id="cloud-budget-panel"><h3>每日云端调用上限</h3>
+      <p class="hint">这是 XZBot 的本地请求次数上限，不是 API 余额，也不是 token 或金额预算。同一 QQ 账号下的所有群、私聊和角色共用；另一个 QQ 账号单独计数。</p>
+      <div id="cloud-budget-usage" class="notice" role="status">尚未读取今日用量。</div>
+      <form id="cloud-budget-form" novalidate><label for="daily-cloud-requests">每天最多调用（次）</label><input id="daily-cloud-requests" type="number" min="1" max="10000" step="1" required>
+      <p class="hint">对话、接话判断、话题判断、记忆整理、云端搜索、语音合成共用此额度；一次回复可能消耗多次。已发出的失败请求也计数。普通消息接收和本地检查不计数。</p>
+      <p class="hint">UTC 每天 0 点重置，即北京时间每天 8 点。提高上限会允许更多付费请求；保存后立即生效，不清空今日计数，也不会自动重发之前的消息。</p>
+      <div class="toolbar"><button type="submit" class="primary">保存调用上限</button><button type="button" id="refresh-cloud-budget" class="quiet">刷新用量</button><span id="cloud-budget-state" class="status-message" role="status"></span></div></form>
+    </div>
     <div class="panel" style="margin-top:20px" id="gemini-panel"><h3>Gemini Balance</h3><p class="hint">在本机运行轻量网关，将对话请求交给 Gemini 云端；轮询是在你提供的多个 API key 之间分配请求，不是轮询群消息。模型推理仍在云端。</p><form id="gemini-form" novalidate><label for="gemini-model">Gemini 模型名称</label><input id="gemini-model" list="gemini-model-options" maxlength="160" autocomplete="off" placeholder="填写你的账号可用的 Gemini 模型 ID"><datalist id="gemini-model-options"></datalist><p class="hint">可输入模型 ID；列表只包含配置中已知的名称，不表示云端可用性已经验证。</p><div class="separated"><h3>替换整组 Gemini API keys</h3><p id="gemini-key-status" class="hint">连接后读取已配置数量。</p><div id="gemini-key-fields" class="record-list"></div><div class="toolbar"><button id="add-gemini-key" class="quiet" type="button">再加一个密钥输入框</button></div><p class="hint">可在一个输入框粘贴多行 key，会分成隐藏输入框。填写新 key 将替换整组；全部留空表示保留原组。最多 50 个。</p><label><input id="clear-gemini-keys" type="checkbox"> 删除钥匙串中整组 Gemini keys</label></div><div class="toolbar"><button class="primary" type="submit">保存 Gemini 配置</button><button id="reload-gemini" class="quiet" type="button">刷新网关状态</button><span id="gemini-state" class="status-message" role="status"></span></div><p class="hint">无论保存成功或失败，密钥输入都会清空。替换密钥后正在运行的网关会停止，请手动重新启动以采用新密钥。</p></form><div class="separated"><div id="gemini-runtime" class="record-text">尚未载入网关状态。</div><div class="toolbar"><button id="install-gemini" class="quiet" type="button">安装 / 修复网关</button><button id="start-gemini" class="primary" type="button">启动网关</button><button id="stop-gemini" class="quiet" type="button">停止网关</button></div><p class="hint">安装会下载固定版本的开源组件。启动只启动本机网关，不测试模型；运行中也不代表云端请求已经成功。停止后，使用 Gemini 的对话暂时无法生成。</p></div></div>
 
   </section>
@@ -377,6 +385,7 @@ async function action(button, stateId, fn){const wasDisabled=button?.disabled;if
 const pageViews=new Map();
 function selectPageView(page,key,{focus=false}={}){
  const state=pageViews.get(page);if(!state||!state.keys.includes(key))return;
+ if(connected&&page==='providers'&&key==='budget')void action(null,'cloud-budget-state',loadCloudBudget);
  state.active=key;
  for(const [node,keys] of state.nodes)node.classList.toggle('page-view-hidden',!keys.includes(key));
  for(const button of state.buttons){const selected=button.dataset.pageView===key;button.setAttribute('aria-selected',String(selected));button.tabIndex=selected?0:-1;if(selected&&focus)button.focus();}
@@ -416,7 +425,7 @@ function initPageViews(){
  const emptyGroup=el('p','notice hidden','当前选择的是私聊。请选择一个群聊后配置群聊参与。');emptyGroup.id='group-scope-note';$('groups').querySelector('.section-head').after(emptyGroup);
  c=children('subscriptions');addPageViews('subscriptions',[['list','消息推送'],['catalog','订阅对象'],['add','添加订阅'],['activity','角色动态'],['credentials','平台凭据'],['deliveries','推送记录'],['commands','QQ 指令']],[['list',[c[2]]],['add',[c[1]]],['activity',[c[3]]],['catalog',[$('subscription-catalog-panel')]],['commands',[c[5]]],['credentials',[c[6]]],['deliveries',[c[7]]]]);
  c=children('providers-form');const providerSave=c[5].querySelector('.toolbar');$('providers-form').append(providerSave);providerSave.classList.add('page-save-bar');const providerNote=c[5].querySelector('.footer-note');$('providers-form').append(providerNote);
- addPageViews('providers',[['model','对话模型'],['vision','识图'],['search','联网搜索'],['voice','语音与音色'],['context','上下文容量'],['balance','Gemini Balance'],['credentials','凭据来源']],[['model',[c[0]]],['search',[c[1]]],['vision',[c[2]]],['context',[c[3]]],['voice',[c[4]]],['credentials',[c[5]]],['balance',[$('gemini-panel')]],['model vision search voice context credentials',[providerSave,providerNote]]]);
+ addPageViews('providers',[['model','对话模型'],['vision','识图'],['search','联网搜索'],['voice','语音与音色'],['context','上下文容量'],['budget','调用额度'],['balance','Gemini Balance'],['credentials','凭据来源']],[['model',[c[0]]],['search',[c[1]]],['vision',[c[2]]],['context',[c[3]]],['voice',[c[4]]],['credentials',[c[5]]],['balance',[$('gemini-panel')]],['budget',[$('cloud-budget-panel')]],['model vision search voice context credentials',[providerSave,providerNote]]]);
  c=children('assets');addPageViews('assets',[['library','素材库'],['upload','添加图片']],[['library',[c[2],c[3]]],['upload',[c[1]]]]);
  c=children('knowledge');addPageViews('knowledge',[['library','资料库'],['add','添加资料'],['loading','加载方式说明']],[['library',[c[4],c[5]]],['add',[c[2]]],['loading',[c[1],c[3]]]]);
  c=children('memory');const memoryManagement=c[4],memoryFields=memoryManagement.querySelector('.fields'),memberControls=[...memoryFields.children].filter(n=>n.id!=='memory-group-panel');
@@ -579,7 +588,7 @@ $('access-form').addEventListener('submit',e=>{e.preventDefault();action(e.submi
  await api('settings',{method:'PUT',body});await loadSettings();await loadStatus();message('access-state','账号与白名单已保存。首次启用请先完成 NapCat 登录。','success');
 });});
 let qqHealth=null,qqHealthTimer=null,qqHealthBusy=false,qqHealthSequence=0;
-const qqStateLabels={online:'QQ 接口在线',degraded:'QQ 收发异常',offline:'QQ 已离线',disconnected:'消息通道断开',reconnecting:'QQ 正在重连',initializing:'QQ 登录初始化',login_required:'QQ 需要登录',unavailable:'QQ 状态读取失败',mismatch:'QQ 账号不匹配',not_bound:'尚未绑定 QQ',not_applicable:'未使用普通 QQ',unknown:'QQ 状态无法确认'};
+const qqStateLabels={online:'QQ 接口在线',degraded:'QQ 回执待核实',offline:'QQ 已离线',disconnected:'消息通道断开',reconnecting:'QQ 正在重连',initializing:'QQ 登录初始化',login_required:'QQ 需要登录',unavailable:'QQ 状态读取失败',mismatch:'QQ 账号不匹配',not_bound:'尚未绑定 QQ',not_applicable:'未使用普通 QQ',unknown:'QQ 状态无法确认'};
 function qqConnectionText(data){return data?.fresh_until&&data.fresh_until<Date.now()/1000?'QQ 状态已过期':qqStateLabels[data?.state]||qqStateLabels.unknown;}
 function renderQQConnection(data){
  qqHealth=data;$('qq-health-panel').classList.toggle('hidden',settings.transport!=='onebot');if(settings.transport!=='onebot')return;
@@ -641,6 +650,22 @@ const credentialSources={private_file:'迁移凭据文件',environment:'环境�
 function selectProviderFields(){$('deepseek-fields').classList.toggle('hidden',$('llm-provider').value!=='deepseek');$('compatible-fields').classList.toggle('hidden',$('llm-provider').value!=='openai_compatible');$('gemini-provider-note').classList.toggle('hidden',$('llm-provider').value!=='gemini_balance');}
 function providerAddressNote(){const changed=$('llm-base-url').value.trim()!==providerBaseURL;$('compatible-address-note').textContent=changed?'基础地址已更改，旧地址的密钥不会转交。若此地址尚未配置密钥，请单独填写；切回已保存的地址可以恢复其原有密钥。':'兼容密钥与基础地址绑定。新地址需配置自己的密钥；切回以前保存过的地址，可以恢复该地址已有的密钥。';}
 function providerCredential(label,record){return label+'：'+(record?.configured?'已配置':'未配置')+' · 当前来源：'+(credentialSources[record?.source]||'未知')+(record?.source==='environment'?'（优先于本页保存的密钥）':'');}
+function renderCloudBudget(data){
+ $('daily-cloud-requests').value=data.limit;
+ $('cloud-budget-usage').textContent='今日已用 '+data.used+' / '+data.limit+' 次 · 剩余 '+data.remaining+' 次'+(data.remaining===0?' · 已达上限':'')+'。下次重置：'+new Date(data.resets_at*1000).toLocaleString()+'（本机时间）。';
+}
+async function loadCloudBudget(){renderCloudBudget(await api('cloud-budget'));message('cloud-budget-state','已读取当前账号用量。','success');}
+$('refresh-cloud-budget').addEventListener('click',e=>action(e.currentTarget,'cloud-budget-state',loadCloudBudget));
+$('cloud-budget-form').addEventListener('submit',e=>{e.preventDefault();void action(e.submitter,'cloud-budget-state',async()=>{
+ const limit=Number($('daily-cloud-requests').value);
+ if(!Number.isInteger(limit)||limit<1||limit>10000)throw configurationError('daily-cloud-requests','调用上限请填写 1 到 10,000 的整数。');
+ renderCloudBudget(await api('cloud-budget',{method:'PUT',body:{daily_cloud_requests:limit}}));
+ message('cloud-budget-state','调用上限已保存；今日计数保留，不自动重发。','success');
+});});
+function deliveryErrorHint(code){
+ const hints={send_timeout:'等待 QQ 回执超时；消息可能已经送达。',missing_receipt:'QQ 接口没有返回有效消息编号；消息可能已经送达。',session_invalid:'QQ 返回会话失效，请检查登录状态。',api_unavailable:'发送时 QQ 接口连接不可用。',bridge_error:'发送或解析回执时发生异常，无法确认送达。'};
+ return hints[code]||(/^onebot_retcode_-?[0-9]{1,10}$/.test(code)?'QQ 接口返回错误码 '+code.slice(15)+'；此码不能证明腾讯风控，也不能单独证明未送达。':diagnosticHint(code));
+}
 async function loadProviders(){
  const data=await api('providers'),values=data.settings||{},credentials=data.credentials||{};
  $('provider-mode').value=values.provider_mode||'mock';$('llm-provider').value=values.llm_provider||'deepseek';
@@ -770,7 +795,7 @@ let subscriptionSettings={},subscriptionsLoaded=false;
 let subscriptionLibrary=[],subscriptionReuse=null,subscriptionLibraryRequest=0;
 const diagnosticServices={llm:'对话模型',tts:'语音合成',summary:'记忆摘要',core:'本机服务'};
 function diagnosticHint(code){
- const exact={credential_store_unavailable:'无法访问系统钥匙串，请检查 macOS 的钥匙串权限。',deepseek_not_configured:'尚未配置对话 API 密钥，请到「模型与语音」填写。',model_not_configured:'尚未选择模型，请到「模型与语音」填写。',cloud_budget:'今天的云端调用额度已用完。',daily_cloud_budget:'今天的云端调用额度已用完。',deepseek_network_or_format:'请求超时、网络连接失败或模型返回格式不符合约定。',deepseek_incomplete:'模型输出被截断，未形成完整的回复。',invalid_reply_object:'模型没有按约定返回可用回复。',empty_reply:'模型没有返回实际回复内容。',fish_not_configured:'语音 API 密钥或音色 ID 尚未配置。',fish_network_or_storage:'语音服务连接失败或本地音频保存失败。',fish_invalid_wav:'语音服务返回的音频不可用。',internal_failure:'本机处理未完成，请检查服务状态。'};
+ const exact={credential_store_unavailable:'无法访问系统钥匙串，请检查 macOS 的钥匙串权限。',deepseek_not_configured:'尚未配置对话 API 密钥，请到「模型与语音」填写。',model_not_configured:'尚未选择模型，请到「模型与语音」填写。',cloud_budget:'XZBot 本地每日调用次数已达上限。请到「模型与语音 → 调用额度」查看或调整；这不是 API 账户余额。',daily_cloud_budget:'XZBot 本地每日调用次数已达上限。请到「模型与语音 → 调用额度」查看或调整；这不是 API 账户余额。',deepseek_network_or_format:'请求超时、网络连接失败或模型返回格式不符合约定。',deepseek_incomplete:'模型输出被截断，未形成完整的回复。',invalid_reply_object:'模型没有按约定返回可用回复。',empty_reply:'模型没有返回实际回复内容。',fish_not_configured:'语音 API 密钥或音色 ID 尚未配置。',fish_network_or_storage:'语音服务连接失败或本地音频保存失败。',fish_invalid_wav:'语音服务返回的音频不可用。',internal_failure:'本机处理未完成，请检查服务状态。'};
  if(exact[code])return exact[code];
  if(/_(output_not_json|output_not_object)$/.test(code))return '模型返回了内容，但未遵守 JSON 对象格式；不是网络断开。';
  if(/_timeout$/.test(code))return '等待模型服务响应超时。';
@@ -1214,10 +1239,10 @@ $('trigger-idle-now').addEventListener('click',e=>action(e.currentTarget,'manual
  if(!scope||!scope.includes(':group:'))throw new Error('请先在页面顶部选择一个群。');
  const request_id=Array.from(crypto.getRandomValues(new Uint8Array(16)),v=>v.toString(16).padStart(2,'0')).join('');
  let row=await api('groups/idle/trigger',{method:'POST',body:{scope,request_id}});
- const labels={queued:'已排队，等待 QQ 通道领取…',generating:'正在生成开场…',prepared:'已生成，等待 QQ 发送…',authorized:'正在发送…',sent:'已取得 QQ 发送回执。',uncertain:'未取得可靠回执，请在 QQ 核对；不会自动重发。',failed:'生成或发送失败，请查看调用轨迹与本机诊断。',silent:'未生成有效开场，请查看调用轨迹。',cancelled:'群聊、角色或权限已变化，本次已取消。',expired:'等待超时，请检查 QQ 连接。',interrupted:'服务重启，本次已取消。'};
+ const labels={queued:'已排队，等待 QQ 通道领取…',generating:'正在生成开场…',prepared:'已生成，等待 QQ 发送…',authorized:'正在发送…',sent:'已取得 QQ 发送回执。',uncertain:'已尝试发送，但回执未确认；QQ 可能已经收到，请在 QQ 核对。不会自动重发。',failed:'生成或发送失败，请查看调用轨迹与本机诊断。',silent:'未生成有效开场，请查看调用轨迹。',cancelled:'群聊、角色或权限已变化，本次已取消。',expired:'等待超时，请检查 QQ 连接。',interrupted:'服务重启，本次已取消。'};
  for(let n=0;n<130;n++){
   if(generation!==profileGeneration||scope!==sharedScope)return;
-  message('manual-idle-state',labels[row.status]||row.status,row.status==='sent'?'success':'');
+  message('manual-idle-state',(labels[row.status]||row.status)+(row.error_code?' '+deliveryErrorHint(row.error_code)+' ['+row.error_code+']':''),row.status==='sent'?'success':'');
   if(!['queued','generating','prepared','authorized'].includes(row.status))return;
   await new Promise(resolve=>setTimeout(resolve,2000));
   if(generation!==profileGeneration||scope!==sharedScope)return;
@@ -1497,6 +1522,7 @@ function renderTrajectoryDelivery(parent,row,detail){
  else if(state==='uncertain')reason='发送请求的结果无法确认；为避免重复发送，不自动补发。';
  else if(state==='unknown')reason='未找到可准确关联的发送记录；不能凭生成成功推断已送达。';
  if(reason)box.append(el('p','hint',reason));
+ if(row.delivery.error_code)box.append(el('p','hint',deliveryErrorHint(row.delivery.error_code)+' ['+row.delivery.error_code+']'));
  const cp=row.confidence_policy;if(cp&&typeof cp.effective==='number')box.append(el('p','record-meta','本次门槛曲线：'+({fixed:'固定',slow_start:'前缓曲线',linear:'匀速下降'}[cp.mode]||cp.mode)+' · 基础 '+cp.base+' · 最低 '+cp.floor+' · 已沉默 '+Math.floor(cp.silence_seconds/60)+' 分钟 · 实际门槛 '+cp.effective));
  if(row.status==='topic_blocked')box.append(el('p','hint','没有调用回复模型，因此没有接话置信度或候选回答。'));
  else if(!row.participation_vote&&['followup','group_decision','group_idle'].includes(row.kind)){

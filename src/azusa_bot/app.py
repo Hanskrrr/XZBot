@@ -275,6 +275,21 @@ def create_app(root: Path | None = None) -> FastAPI:
                 "qq_note":"核心不持有QQ连接；实际连接状态请在NapCat与AstrBot中确认。" if settings.transport == "onebot" else "核心不持有QQ连接；实际连接状态请在AstrBot中确认。",
                 "runtime":"cloud APIs + SQLite; no local inference models"}
 
+    @app.get("/admin/cloud-budget", dependencies=[Depends(admin)])
+    def cloud_budget_get():
+        return engine.ledger.cloud_budget(read_settings(root).daily_cloud_requests)
+
+    @app.put("/admin/cloud-budget", dependencies=[Depends(admin)])
+    async def cloud_budget_put(request: Request):
+        body = await json_object(request)
+        value = body.get("daily_cloud_requests")
+        if set(body) != {"daily_cloud_requests"} or type(value) is not int or not 1 <= value <= 10000:
+            raise HTTPException(400, "invalid_cloud_budget")
+        with settings_lock:
+            latest = read_settings(root)
+            write_settings(root, Settings.model_validate(latest.model_dump() | {"daily_cloud_requests": value}))
+        return cloud_budget_get()
+
     @app.get("/admin/settings", dependencies=[Depends(admin)])
     def settings_get():
         return engine.settings().model_dump()
@@ -769,9 +784,9 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.post("/bridge/idle/ack", dependencies=[Depends(bridge)])
     async def idle_ack(request: Request):
         body=await json_object(request)
-        if set(body)-{"id","claim_token","self_id","status","message_id"}:
+        if set(body)-{"id","claim_token","self_id","status","message_id","error_code"}:
             raise HTTPException(400,"invalid_idle_request")
-        return engine.idle.ack(body.get("id"),body.get("claim_token"),body.get("self_id"),body.get("status"),body.get("message_id"))
+        return engine.idle.ack(body.get("id"),body.get("claim_token"),body.get("self_id"),body.get("status"),body.get("message_id"),body.get("error_code"))
 
     @app.post("/bridge/notifications/authorize", dependencies=[Depends(bridge)])
     async def notification_authorize(request: Request):

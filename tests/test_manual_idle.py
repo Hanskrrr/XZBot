@@ -62,6 +62,17 @@ async def test_manual_revocation_after_generation_and_failed_send_not_retried(ri
     assert len(p.calls)==1
 
 
+@pytest.mark.parametrize('code,expected', [('send_timeout','send_timeout'), ('secret-from-upstream','bridge_error')])
+async def test_manual_receipt_diagnostic_persisted_without_retry(rig,code,expected):
+    e,s,_,p=rig;e.idle.queue_manual(SCOPE,'a'*32)
+    item,=await e.idle.claim_manual(SELF)
+    assert e.idle.authorize(item['id'],item['claim_token'],SELF)
+    assert e.idle.ack(item['id'],item['claim_token'],SELF,'uncertain',error_code=code)['acknowledged']
+    assert e.idle.manual_status(item['id'])['error_code']==expected
+    assert attach_delivery(e,e.trajectories.list()['items'])[0]['delivery']['error_code']==expected
+    assert await e.idle.claim_manual(SELF)==[] and len(p.calls)==1
+
+
 @pytest.mark.parametrize('connection_state',['online','degraded'])
 def test_api_auth_offline_idempotency_and_status(rig,monkeypatch,connection_state):
     e,s,_,_=rig;app=create_app(e.root)

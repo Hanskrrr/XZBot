@@ -140,6 +140,16 @@ class Ledger:
             else:
                 db.execute("UPDATE deliveries SET status=? WHERE reply_id=?", (status, reply_id))
 
+    def cloud_budget(self, limit: int) -> dict:
+        """Read the same account-wide UTC counter used by consume; no mutation."""
+        now = time.time()
+        day = time.strftime("%Y-%m-%d", time.gmtime(now))
+        with self.db() as db:
+            row = db.execute("SELECT used FROM budget WHERE day=?", (day,)).fetchone()
+        used = row[0] if row else 0
+        return {"day": day, "timezone": "UTC", "used": used, "limit": limit,
+                "remaining": max(0, limit-used), "resets_at": (int(now)//86400+1)*86400}
+
     def consume(self, limit: int) -> bool:
         day = time.strftime("%Y-%m-%d", time.gmtime())
         with self.db() as db:
