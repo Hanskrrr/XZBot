@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import re,sqlite3,time
 
-_CODES = {'ok','unknown','internal_failure','credential_store_unavailable','deepseek_not_configured',
+_CODES = {'output_contract_invalid','ok','unknown','internal_failure','credential_store_unavailable','deepseek_not_configured',
  'model_not_configured','deepseek_incomplete','deepseek_network_or_format','invalid_reply_object',
  'empty_reply','fish_not_configured','fish_audio_too_large','fish_invalid_wav','fish_network_or_storage',
  'voice_budget_exhausted','cloud_budget','summary_invalid','provider_unknown_error',
@@ -38,6 +38,7 @@ def safe_code(value) -> str:
 
 
 def explanation(code):
+    if code=='output_contract_invalid':return '模型返回缺失或无效的接话控制字段；本次没有通过输出校验。具体字段与本群生效设置见调用轨迹。'
     if code=='ok':return '最近一次调用成功。'
     if code=='unknown':return '尚无调用结果。'
     if re.fullmatch(r'(?:deepseek|gemini_balance)_timeout',code):return '等待模型服务响应超时；这不是 QQ 登录错误。'

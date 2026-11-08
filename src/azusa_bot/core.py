@@ -19,7 +19,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 
-from . import lore, assets, web_search, group_topic, participation_vote, conversation_config, segmented_delivery, request_context
+from . import lore, assets, web_search, group_topic, participation_vote, conversation_config, segmented_delivery, request_context, reply_contract
 from .memory import MemoryStore
 from .group_chat import GroupConversation
 from .dialogue import RecentDialogue, refers_back, requests_repeat
@@ -454,7 +454,15 @@ class Engine:
                 messages[0]["content"] += "\n"+vote_prompt
         refs["prompt_prefixes"]={key:prompt(self.content_root,key,settings) for key in ("direct_header","group_header","followup_header","recent_header","current_header")}
         prefixes = dict(refs["prompt_prefixes"])
-        render_request = lambda rows: request_context.render(rows,kind=kind,prefixes=prefixes)
+        contract = reply_contract.build(settings, kind, tools=[key for key, allowed in
+            (("web_search",allow_search),("knowledge_query",allow_knowledge),("history_query",allow_history)) if allowed])
+        contract_text = prompt(self.content_root,"reply_contract",settings) if contract else None
+        render_request = lambda rows: request_context.render(rows,kind=kind,prefixes=prefixes,
+            contract=contract,contract_text=contract_text)
+        refs["reply_contract"] = contract
+        if kind in reply_contract.CHAT_KINDS and ":group:" in scope:
+            from .group_policies import FIELDS
+            refs["effective_group_settings"] = {key:getattr(settings,key) for key in sorted(FIELDS)}
         refs["prompt_revision"]=prompt_revision(prompt_overrides(self.content_root),character=character_name(self.content_root))
         visual_events = retained_events(messages,refs,kind,image_event_id,history_events)
         if settings.vision_enabled and visual_events:
@@ -559,6 +567,7 @@ class Engine:
                     raise _GeneratedContextChanged()
                 if not isinstance(answer, dict):
                     raise ProviderError("invalid_reply_object")
+                contract_errors=reply_contract.control_errors(answer,settings,kind)
                 answer=participation_vote.apply(answer,settings,kind)
                 from .knowledge_lookup import query as knowledge_query
                 from .history_lookup import query as history_query
@@ -571,7 +580,8 @@ class Engine:
                         answer.get("participate") is False or (kind == "followup" and answer.get("continuation") is False))
                     self.trajectories.record_response(number,"" if (silent and not answer.get("_participation_vote")) or researching else clean_reply(raw_response),
                         source_text=None if (silent and not answer.get("_participation_vote")) or researching else raw_response)
-                    self.trajectories.finish(number,"research_requested" if researching else "success", result=dict(answer,
+                    self.trajectories.finish(number,"invalid_output" if contract_errors else "research_requested" if researching else "success",
+                        error="output_contract_invalid" if contract_errors else None, result=dict(answer,_contract_errors=contract_errors,
                         output_characters=len(answer.get("text", "")) if isinstance(answer.get("text"), str) else 0))
                 if kind=="group_topic":
                     topic_prefix=refs["prompt_prefixes"]["group_header"]

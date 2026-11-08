@@ -26,7 +26,7 @@ from .providers import ProviderError
 KINDS = {"reply", "group_idle", "group_decision", "followup", "summary", "tts", "web_search", "group_topic"}
 TRIGGERS = {"direct", "group_observation", "followup", "automatic", "background", "manual"}
 STATUSES = {"running", "success", "failed", "saved", "no_facts", "superseded",
-            "interrupted", "cloud_budget", "cloud_backoff", "profile_changed", "research_requested", "topic_blocked"}
+            "interrupted", "invalid_output", "cloud_budget", "cloud_backoff", "profile_changed", "research_requested", "topic_blocked"}
 REQUEST_TAIL_CHARS = 120
 RESPONSE_PREVIEW_CHARS = 2000
 REDACTED = "[已隐藏可能包含凭据的内容]"
@@ -360,6 +360,9 @@ class TrajectoryStore:
             vote=safe_result(result.get("_participation_vote"))
             if vote is not None:
                 data["participation_vote"]=vote
+            fields={"participate","confidence","continuation",*("votes."+k for k in ("relevance","understanding","contribution","timing"))}
+            errors=result.get("_contract_errors")
+            if isinstance(errors,list):data["contract_errors"]=[v for v in errors if isinstance(v,str) and v in fields]
             for key in ("processed", "saved", "output_characters"):
                 value = result.get(key)
                 if type(value) is int and 0 <= value <= 100000:
@@ -405,6 +408,8 @@ class TrajectoryStore:
         row["delivery_event_key"] = key if isinstance(key,str) and re.fullmatch(r"[a-f0-9]{64}",key) else None
         row["context_budget"] = refs.get("context_budget")
         row["request_layout"] = refs.get("request_layout")
+        row["reply_contract"] = refs.get("reply_contract")
+        row["effective_group_settings"] = refs.get("effective_group_settings")
         row["prompt_revision"] = refs.get("prompt_revision")
         row["begin_dialogs"] = refs.get("begin_dialogs")
         row["execution"] = refs.get("execution")

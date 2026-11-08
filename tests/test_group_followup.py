@@ -166,7 +166,9 @@ async def test_generated_followup_exposes_why_it_was_not_sent(rig,confidence,sta
     assert result["mode"]=="none" and result["reason"]==reason
     rows=engine.trajectories.list(kind="followup")["items"]
     attach_delivery(engine,rows)
-    assert rows[0]["status"]=="success" and rows[0]["response_text"]=="合成的候选回复"
+    assert rows[0]["status"]==("success" if state=="valid" else "invalid_output")
+    assert rows[0]["response_text"]=="合成的候选回复"
+    if state!="valid":assert rows[0]["contract_errors"]==["confidence"]
     assert rows[0]["confidence_state"]==state
     assert rows[0].get("confidence")==(.79 if state=="valid" else None)
     assert rows[0]["delivery"]=={"state":"not_sent","status":reason,"mode":"none","reply_id":result["reply_id"]}

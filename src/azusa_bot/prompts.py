@@ -17,7 +17,7 @@ DEFAULTS = {key:row['text'] for key,row in CATALOG.items()}
 LOCK = threading.RLock()
 VARIABLES = {'character_name','max_reply_chars','max_voice_chars','idle_minutes','voice_availability'}
 SCENES = {
-    '实际输入排列':['persona','examples','direct_header','recent_header','current_header'],
+    '实际输入排列':['persona','examples','direct_header','recent_header','current_header','reply_contract'],
     '直接回复':['persona_header','persona','direct','knowledge','expression','vision','output','style','dialogue','persona_footer','topic_use','role_activity','search','knowledge_lookup','history_lookup','examples'],
     '群聊接话':['persona_header','persona','group','knowledge','expression','vision','output','style','dialogue','heat','addressed','persona_footer','topic_use','role_activity','search','knowledge_lookup','history_lookup','examples','participation_vote'],
     '连续对话':['persona_header','persona','group','knowledge','expression','vision','output','style','dialogue','persona_footer','followup','topic_use','role_activity','search','knowledge_lookup','history_lookup','examples','participation_vote'],

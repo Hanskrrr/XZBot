@@ -35,7 +35,7 @@ def test_all_chat_paths_order_background_timeline_current_once_without_mutation(
     original=source(kind);before=deepcopy(original)
     result=request_context.render(original,kind=kind,prefixes=PREFIXES)
     assert original==before
-    assert len(result)==4 and result[0]['content']=='PERSONA'
+    assert len(result)==4 and result[0]['content'].startswith('PERSONA')
     background=envelope(result[1]);timeline=envelope(result[2])['recent_conversation'];current=envelope(result[-1])['current_message']
     assert background['lore'][0]['text']=='BACKGROUND'
     assert not set(background)&{'current_message','recent_group_messages','confirmed_direct_dialogue'}
@@ -129,5 +129,5 @@ async def test_group_tool_rounds_preserve_the_same_final_anchor(rig,kind):
     for messages in calls:
         assert envelope(messages[-1])['current_message']['text']=='NOW'
         assert envelope(messages[-1])['current_message']['message_id']=='4'
-        assert [r['text'] for r in envelope(messages[2])['recent_conversation']]==['BEFORE','SENT_REPLY','OTHER_PERSON']
+        assert [r['text'] for r in __import__('context_helpers').context(messages)['recent_conversation']]==['BEFORE','SENT_REPLY','OTHER_PERSON']
     assert 'web_evidence' in envelope(calls[-1][1])

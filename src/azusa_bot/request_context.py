@@ -86,7 +86,7 @@ def _timeline(streams, anchor, *, direct_streams=()):
     return result
 
 
-def render(messages, *, kind, prefixes):
+def render(messages, *, kind, prefixes, contract=None, contract_text=None):
     if kind not in CHAT_KINDS:
         return deepcopy(messages)
     prefix = prefixes['direct_header' if kind == 'reply' else 'group_header']
@@ -110,7 +110,16 @@ def render(messages, *, kind, prefixes):
     background = {k:v for k,v in data.items() if k not in (*RECENT_KEYS, 'current_message', 'addressed_candidate')}
     if 'addressed_candidate' in data:background['addressed_candidate'] = True
     result = [deepcopy(messages[0]), {'role':'user', 'content':prefix+json.dumps(background,ensure_ascii=False)}]
-    if recent:
+    if contract is not None:
+        # Keep the effective control fields close to the dialogue even when
+        # pinned background is long. This is application policy, never chat data.
+        label = (prefixes['followup_header'] if kind == 'followup' else '') + contract_text
+        result.append({'role':'system', 'content':label+'\n'+json.dumps(contract,ensure_ascii=False)})
+    elif kind == 'followup':
+        result[0]['content'] += '\n'+prefixes['followup_header'].rstrip()
+    if recent or (kind == 'group_idle' and contract is not None):
+        # An empty transcript truthfully represents a quiet room; keep a user
+        # data envelope last without inventing a new message from a member.
         result.append({'role':'user', 'content':prefixes['recent_header']+json.dumps({'recent_conversation':recent},ensure_ascii=False)})
     if kind != 'group_idle':
         result.append({'role':'user', 'content':prefixes['current_header']+json.dumps({'current_message':anchor},ensure_ascii=False)})
@@ -121,6 +130,8 @@ def layout(messages, *, kind):
     """Content-free provenance for the admin trace; never save raw chat again."""
     if kind not in CHAT_KINDS:return None
     stages = ['persona', 'background']
-    if len(messages) > (2 if kind == 'group_idle' else 3):stages.append('recent_conversation')
+    has_contract = len(messages)>2 and messages[2].get('role')=='system'
+    if has_contract:stages.append('reply_contract')
+    if len(messages) > (2 if kind == 'group_idle' else 3)+int(has_contract):stages.append('recent_conversation')
     if kind != 'group_idle':stages.append('current_message')
     return {'version':1, 'order':stages, 'current_message_last':kind != 'group_idle'}

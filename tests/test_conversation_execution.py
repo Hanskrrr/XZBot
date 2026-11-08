@@ -36,7 +36,7 @@ async def test_examples_are_actual_pairs_before_context_without_becoming_memory(
     assert engine.memory.stats()['history']==0
     trace=engine.trajectories.list()['items'][0]
     assert trace['begin_dialogs']['pairs']==2 and trace['context_budget']['example_tokens']>0
-    assert trace['request_layout']['order']==['persona','examples','background','current_message']
+    assert trace['request_layout']['order']==['persona','examples','background','reply_contract','current_message']
     assert json.loads(model.calls[0][-1]['content'].split('\n',1)[1])['current_message']['text']=='本轮问题'
 
 
