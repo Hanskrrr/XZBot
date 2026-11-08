@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+from pathlib import Path
 import signal
 import subprocess
 import time
@@ -19,13 +21,32 @@ def executable(root):
     return directory(root) / 'QQ.app/Contents/MacOS/QQ'
 
 
+def data_directory(root):
+    """Tencent's signed macOS QQ can only read/write inside its app sandbox.
+
+    Keep each XZBot account separate from the daily QQ's data and from other
+    XZBot roots. A symlink to the project does not grant sandbox access.
+    """
+    account = hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:16]
+    return (Path.home() / 'Library/Containers/com.tencent.qq/Data/Documents/XZBot'
+            / account)
+
+
 def prepared(root):
     base = directory(root)
+    data = data_directory(root)
     try:
         marker = base / 'prepared.json'
+        owner = data / 'owner.json'
+        expected = {'schema': 2, 'root': str(root.resolve())}
         return (not base.is_symlink() and not marker.is_symlink()
-                and json.loads(marker.read_text()) == {'schema': 1, 'root': str(root.resolve())}
-                and executable(root).is_file() and (base/'napcat/napcat.mjs').is_file())
+                and not data.is_symlink() and not data.parent.is_symlink()
+                and not owner.is_symlink() and marker.stat().st_size < 4096
+                and owner.stat().st_size < 4096
+                and json.loads(marker.read_text()) == expected
+                and json.loads(owner.read_text()) == expected
+                and executable(root).is_file() and (data/'napcat/napcat.mjs').is_file()
+                and (data/'napcat-work/config/webui.json').is_file())
     except (OSError, ValueError):
         return False
 
@@ -61,10 +82,13 @@ def start(root):
     from .host import require_free_loopback_port
     require_free_loopback_port(runtime_layout(root).napcat_port)
     base = directory(root)
-    # Never change HOME or fall back to the daily QQ data directory.
-    env = {**os.environ, 'NAPCAT_QQ_DATA_DIR': str(base/'qq-data'),
-           'NAPCAT_WORKDIR': str(base/'napcat-work')}
-    process = subprocess.Popen([str(executable(root)), '--no-sandbox'], cwd=base, env=env,
+    data = data_directory(root)
+    # Keep HOME unchanged. Both Electron and NapCat get account-specific paths.
+    env = {**os.environ, 'NAPCAT_QQ_DATA_DIR': str(data/'qq-data'),
+           'NAPCAT_WORKDIR': str(data/'napcat-work'), 'NAPCAT_DISABLE_PIPE': '1',
+           'NAPCAT_DISABLE_BYPASS': '1'}
+    process = subprocess.Popen([str(executable(root)), '--no-sandbox',
+        '--user-data-dir='+str(data/'electron-data')], cwd=data, env=env,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True)
     identity = _identity(process.pid)

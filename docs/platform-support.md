@@ -35,7 +35,9 @@ SnowLuma 通过 `get_status` 的 `online/good`、`get_login_info` 的账号身�
 
 本机试用环境关闭了自动进程加载。重新启动后，在 SnowLuma「进程注入」选择正确 QQ 并点击「加载」；桌面已登录但仍显示等待登录时，可点击该进程的「刷新管道状态 / 重连」。看到 OneBot 通道已连接后，再启动 XZBot。适配器已在线仍不能替代真实消息收发验证。
 
-2026-11-08 本机验证：Lima + SnowLuma v2.4.2 已通过实际私聊文字与语音收发，并取得发送回执；首次语音有一次未确认且未送达，原因未确定，不能据后续成功宣称长期稳定。原生 Mac 的 App Store / 官网 QQ 独立副本均未通过 NapCat 启动验证；官网副本入口修改还遇到 macOS `Operation not permitted`，保持禁用。原生上游支持不等于本项目已完成适配，不能据此标为可用。
+2026-11-08 本机验证：Lima + SnowLuma v2.4.2 已通过实际私聊文字与语音收发，并取得发送回执；首次语音有一次未确认且未送达，原因未确定，不能据后续成功宣称长期稳定。原生 Mac 仍未通过启动验证，保持禁用。开启应用程序管理权限后，项目副本入口已可修改；QQ 自身沙盒另会拒绝访问项目外置的 NapCat 文件（实测 `EPERM`）。改用容器内独立目录后，QQ 7.0.0-52194 + NapCat 4.18.42 已进入核心初始化，但 macOS 26.3 随后以 `CODESIGNING / Invalid Page` 终止 QQ，故障页位于 `wrapper.node`。单进程及关闭可选 Bypass 的对照均未解决。QQ 7.0.2-53644 的对照也未通过本机启动检查，不能据上游 CI 结果标为可用；未关闭系统保护或重签 QQ。
+
+原生实验的应用副本留在各账号的 `runtime/native-napcat/QQ.app`；NapCat 文件、QQ 数据和 Electron 数据则位于 `~/Library/Containers/com.tencent.qq/Data/Documents/XZBot/<账号根目录的 SHA256 前 16 位>/` 下的独立子目录。它们不使用日常 QQ 的聊天数据目录，也不与其他 XZBot 账号共用。旧版准备标记不能启用新布局；只有实际验证后才能写入匹配账号的 v2 准备标记。备份实验数据时需另行包含此私有容器目录，不能提交 Git。
 
 连接配置包包含访问令牌，不得提交 Git。SnowLuma 的 HTTP 状态端口使用账号基础端口加 6，noVNC 使用加 7；均只转发至 Mac 回环地址。已有 `onebot_<QQ号>.json` 会覆盖全局 `onebot.json`，导入时需要同步对应的 HTTP 和反向 WebSocket 设置。
 
