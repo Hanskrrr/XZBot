@@ -26,6 +26,20 @@ def test_listener_preflight_rejects_bound_and_listening_ports():
     host.require_free_loopback_port(port)
 
 
+@pytest.mark.skipif(os.name=='nt', reason='POSIX listener reuse after TIME_WAIT')
+def test_listener_preflight_allows_immediate_restart():
+    with socket.socket() as server:
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(('127.0.0.1', 0))
+        server.listen()
+        port = server.getsockname()[1]
+        with socket.create_connection(('127.0.0.1', port)) as client:
+            accepted, _ = server.accept()
+            accepted.close()
+            assert client.recv(1) == b''
+    host.require_free_loopback_port(port)
+
+
 def test_private_file_open_and_permissions(tmp_path):
     path=tmp_path/'credential';private_write(path,'synthetic-only')
     with os.fdopen(host.safe_open(path,os.O_RDONLY)) as f:

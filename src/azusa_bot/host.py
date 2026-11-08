@@ -27,6 +27,9 @@ def require_free_loopback_port(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         if WINDOWS:
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            # Like the service listener, tolerate TIME_WAIT after a clean stop.
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         probe.bind(('127.0.0.1', port))
 
 

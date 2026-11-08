@@ -14,6 +14,7 @@ ROOT=Path(__file__).resolve().parents[1]
 
 
 def build(target,uv,out):
+    if not uv.is_file():raise RuntimeError('Native uv executable was not found.')
     subprocess.run(['git','-C',str(ROOT),'diff','--exit-code','HEAD','--'],check=True,stdout=subprocess.DEVNULL)
     subprocess.run([sys.executable,'scripts/check_repository.py','--ref','HEAD'],cwd=ROOT,check=True)
     commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
@@ -46,4 +47,4 @@ def build(target,uv,out):
 
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--platform',required=True,choices=['windows','macos','linux']);p.add_argument('--uv',type=Path,required=True);p.add_argument('--out',type=Path,default=ROOT/'dist/release');args=p.parse_args();build(args.platform,args.uv,args.out)
+    p=argparse.ArgumentParser();p.add_argument('--platform',required=True,choices=['windows','macos','linux']);p.add_argument('--uv',type=Path,default=Path(shutil.which('uv') or ''));p.add_argument('--out',type=Path,default=ROOT/'dist/release');args=p.parse_args();build(args.platform,args.uv,args.out)
