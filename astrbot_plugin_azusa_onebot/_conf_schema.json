@@ -1,0 +1,9 @@
+{
+  "enabled": {"description": "启用独立 OneBot 桥接（先完成白名单和账号配置）", "type": "bool", "default": false},
+  "adapter_id": {"description": "AstrBot OneBot 适配器 ID", "type": "string", "default": "azusa-onebot"},
+  "self_id": {"description": "NapCat 登录的普通 QQ 数字账号（不是官方 Bot AppID）", "type": "string", "default": ""},
+  "allowed_groups": {"description": "仅未配置管理页策略文件时使用的群号白名单", "type": "list", "default": []},
+  "allowed_dm_users": {"description": "仅未配置管理页策略文件时使用的好友 QQ 号白名单", "type": "list", "default": []},
+  "group_chat_enabled": {"description": "把白名单群普通文字交给核心判断是否接话（管理页策略优先）", "type": "bool", "default": false},
+  "core_url": {"description": "本机 XZBot 核心服务地址", "type": "string", "default": "http://127.0.0.1:6196"}
+}

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "azusa-private-bot"
+version = "0.8.21"
+description = "XZBot: private QQ character bot, cloud providers and scoped SQLite memory"
+requires-python = ">=3.12"
+dependencies = ["fastapi==0.162.0", "uvicorn==0.54.0", "httpx==0.28.1", "PyYAML==6.0.3", "qrcode==8.2", "keyring==25.7.0", "Pillow==13.0.0", "beautifulsoup4==4.14.3"]
+
+[project.optional-dependencies]
+dev = ["pytest==9.2.0", "pytest-asyncio==1.4.1.post1"]
+
+[project.scripts]
+azusa-bot = "azusa_bot.cli:main"
+xzbot = "azusa_bot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"azusa_bot" = ["prompt_defaults.json"]
+"azusa_bot.vendor.steam_monitor" = ["LICENSE", "provenance.json"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

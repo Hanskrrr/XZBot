@@ -1,0 +1,11 @@
+name: Source privacy check
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  source-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check published tree
+        run: python3 scripts/check_repository.py --ref HEAD

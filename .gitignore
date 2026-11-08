@@ -1,0 +1,46 @@
+# Private runtime and user content, never distributed with source.
+/data/
+/accounts/
+/content/
+/examples/*
+!/examples/persona.md
+/config/*
+!/config/example.json
+/runtime/
+/.runtime/
+/dist/
+*.token
+*.sqlite*
+*.db
+*.db-*
+*.log
+*.pem
+*.key
+*.p12
+*.pfx
+*.bundle
+*.zip
+.env
+.env.*
+!.env.example
+
+# Dependencies, build products and machine-specific applications.
+.venv/
+node_modules/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.egg-info/
+build/
+.DS_Store
+/QQBot.app
+/XZBot.app
+
+# Historical notes and screenshots belong to the local deployment.
+/docs/*
+!/docs/architecture.md
+!/docs/getting-started.md
+!/docs/synchronization.md
+!/docs/privacy.md
+!/docs/platform-support.md
+!/docs/public-migration.md

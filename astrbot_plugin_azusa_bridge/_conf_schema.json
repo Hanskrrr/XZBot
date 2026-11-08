@@ -1,0 +1,6 @@
+{
+  "enabled": {"description": "启用桥接（切换前先停止旧 DSH QQ 接入）", "type": "bool", "default": false},
+  "adapter_id": {"description": "独立 QQ 适配器 ID", "type": "string", "default": "azusa-official"},
+  "app_id": {"description": "QQ AppID（必须与适配器一致）", "type": "string", "default": ""},
+  "core_url": {"description": "本机 XZBot 服务地址", "type": "string", "default": "http://127.0.0.1:6196"}
+}

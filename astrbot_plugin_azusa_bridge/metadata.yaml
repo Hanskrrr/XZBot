@@ -1,0 +1,6 @@
+name: astrbot_plugin_azusa_bridge
+display_name: XZBot 私人角色 Bot
+desc: 官方 QQ 可信身份接入独立 XZBot 服务；默认关闭，无内置 LLM 或人设。
+version: 0.1.0
+author: private-local
+astrbot_version: ">=4.29.4,<4.30"

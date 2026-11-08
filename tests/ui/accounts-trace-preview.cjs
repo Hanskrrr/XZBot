@@ -1,0 +1,69 @@
+// Offline account boundaries and bounded audit previews; no real QQ or APIs.
+const {chromium}=require('playwright');
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const root=path.resolve(__dirname,'../..');let stage='startup';
+(async()=>{
+ const html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8'),calls=[],errors=[],checks={};
+ const settings={transport:'onebot',onebot_self_id:'100001',onebot_allowed_groups:['300003'],onebot_allowed_dm_users:[],onebot_owners:[],onebot_enabled:true,provider_mode:'mock'};
+ const primary={id:'primary',name:'主账号',qq_number:'100001',active_profile_id:'default',active_profile_name:'角色甲',profiles:[{id:'default',name:'角色甲'}],core_running:true,power_state:'running',prepared:true,busy:false};
+ const childId='b'.repeat(32),child={id:childId,name:'测试 QQ <img src=x>',core_port:6216,qq_number:'100002',active_profile_id:'default',active_profile_name:'角色甲副本',profiles:[{id:'default',name:'角色甲副本'},{id:'c'.repeat(32),name:'角色乙'}],core_running:false,power_state:'stopped',prepared:false,busy:false};
+ const seeds=[{id:'default',name:'角色甲'},{id:'a'.repeat(32),name:'角色乙模板'}];
+ let accounts=[primary],manager=true,holdPrepare=false,releasePrepare=null;
+ const traceRows=[
+  {id:4,kind:'reply',status:'success',mode:'text',request_tail:'早一些的内容。<img src=x onerror=fixtureAttack()>这次到底是哪条问题？',request_kind:'message',request_truncated:true,response_text:'这是实际生成的回答。<script>fixtureAttack()</script>'+('续句'.repeat(1100)),response_kind:'reply',response_truncated:true,preview_redacted:false},
+  {id:3,kind:'group_decision',status:'success',mode:'silent',request_tail:'这句并不是在问角色。',request_kind:'message',response_text:'',response_kind:'reply',preview_redacted:false},
+  {id:2,kind:'reply',status:'success',request_tail:null,response_text:null,preview_redacted:false},
+  {id:101,kind:'followup',status:'success',mode:'text',request_tail:'',request_kind:'message',response_text:'这是已生成但未发送的合成回答',response_kind:'reply',counts:{images:1},delivery:{state:'not_sent',status:'followup_low_confidence',mode:'none'}},
+  {id:102,kind:'followup',status:'success',mode:'text',request_tail:'继续呢',response_text:'合成低置信度候选',confidence_state:'valid',confidence:.7,delivery:{state:'not_sent',status:'followup_low_confidence',mode:'none'}},
+  {id:1,kind:'reply',status:'success',request_tail:'FORGOTTEN_PRIVATE_INPUT',response_text:'FORGOTTEN_PRIVATE_OUTPUT',preview_redacted:true},
+ ];
+ const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'});
+ try{
+  const page=await browser.newPage({viewport:{width:1280,height:980}});await page.addInitScript(()=>{window.open=()=>({location:{href:'about:blank',replace(){}},document:{title:'',body:{textContent:''}},focus(){},close(){}});});page.on('pageerror',error=>errors.push(error.message));
+  await page.route('**/*',async route=>{
+   const req=route.request(),url=new URL(req.url()),method=req.method(),body=req.postDataJSON();assert.equal(url.origin,'http://xzbot-accounts.test');calls.push({path:url.pathname,method,body});let result={},status=200;
+   if(url.pathname==='/'){await route.fulfill({contentType:'text/html',body:html});return;}
+   if(url.pathname==='/admin/status')result={settings,credentials:{},stats:{},version:'offline'};
+   else if(url.pathname==='/admin/profiles')result={active_id:'default',profiles:[{id:'default',name:'角色甲',voice:{}}]};
+   else if(url.pathname==='/admin/settings')result=settings;
+   else if(url.pathname==='/admin/persona')result={text:'# 合成角色'};
+   else if(url.pathname==='/admin/bot-power')result={state:'running',enabled:true,busy:false,error_code:''};
+   else if(url.pathname==='/admin/accounts'){
+    if(method==='POST'){assert.deepEqual(body,{name:'测试 QQ <img src=x>',profile_id:'default'});accounts.push(child);result={...child};}
+    else result={is_manager:manager,accounts:manager?accounts:[child],seed_profiles:manager?seeds:[]};
+   }else if(url.pathname.startsWith('/admin/accounts/'+childId+'/')){
+    const operation=url.pathname.split('/').at(-1);assert.equal(method,'POST');
+    if(operation==='prepare'){
+     child.busy=true;child.operation='prepare';if(holdPrepare)await new Promise(resolve=>releasePrepare=resolve);child.busy=false;child.prepared=true;child.core_running=true;result={accepted:true};
+    }else if(operation==='management'){assert.deepEqual(body,{});child.core_running=true;result={url:'http://127.0.0.1:6216/#token=SYNTHETIC_CHILD'};}
+    else if(operation==='profile'){assert.equal(body.profile_id,'c'.repeat(32));child.active_profile_id=body.profile_id;child.active_profile_name='角色乙';result={accepted:true};}
+    else if(operation==='copy-profile'){assert.equal(body.profile_id,'a'.repeat(32));child.profiles.push({id:'d'.repeat(32),name:'角色乙模板副本'});result={profile_id:'d'.repeat(32)};}
+    else if(operation==='stop'){assert.deepEqual(body,{});child.power_state='stopping';result={accepted:true};}
+    else {status=400;result={detail:'unknown account action'};}
+   }else if(url.pathname==='/admin/trajectories')result={profile_id:'default',items:traceRows};
+   else if(url.pathname.startsWith('/admin/trajectories/'))result={...traceRows.find(row=>row.id===Number(url.pathname.split('/').at(-1))),profile_id:'default',references:{}};
+   await route.fulfill({status,contentType:'application/json',headers:{'X-XZBot-Profile':'default'},body:JSON.stringify(result)});
+  });
+  const wait=(id,text)=>{stage=id+': '+text;return page.waitForFunction(({id,text})=>document.getElementById(id).textContent.includes(text),{id,text});};
+  const posts=path=>calls.filter(row=>row.method==='POST'&&row.path===path);
+  const card=()=>page.locator('[data-account-id="'+childId+'"]');
+  await page.goto('http://xzbot-accounts.test/#token=SYNTHETIC_ADMIN');await wait('desktop-state','已读取');assert(!calls.some(row=>row.path==='/admin/accounts'));assert.equal(calls.filter(row=>row.method!=='GET').length,0);assert((await page.locator('.profile-switcher').innerText()).includes('本账号角色'));checks.lazy_read_only_startup=true;
+  await page.locator('[data-tab="accounts"]').click();await wait('accounts-state','已读取');await page.locator('#accounts-view-create').click();assert.equal(await page.locator('#account-create-panel').isVisible(),true);assert.equal(await page.locator('[data-account-id="primary"] [data-account-action]').count(),0);assert((await page.locator('#account-create-panel').innerText()).includes('不复制聊天、记忆'));checks.primary_controls_and_copy_boundary=true;
+  await page.locator('#account-name').fill(child.name);await page.locator('#account-seed-profile').selectOption('default');await page.locator('#create-account').click();await wait('account-create-state','保持关闭');assert.equal(accounts.length,2);assert.equal(child.core_running,false);assert.equal(posts('/admin/accounts').length,1);assert.equal(await card().locator('img').count(),0);assert.equal(await page.locator('#account-name').inputValue(),'');checks.create_stopped_without_login=true;await page.locator('#accounts-view-list').click();
+  holdPrepare=true;await card().locator('[data-account-action="prepare"]').click();await page.waitForFunction(id=>document.querySelector('[data-account-id="'+id+'"] [data-account-action="prepare"]').disabled,childId);assert.equal(await card().locator('[data-account-action="open"]').isDisabled(),true);await card().locator('[data-account-action="prepare"]').evaluate(button=>button.dispatchEvent(new Event('click')));assert.equal(posts('/admin/accounts/'+childId+'/prepare').length,1);releasePrepare();await wait('accounts-state','正在准备');await page.waitForFunction(id=>!document.querySelector('[data-account-id="'+id+'"] [data-account-action="open"]').disabled,childId);checks.prepare_prevents_duplicate_operations=true;
+  await card().locator('select[id^="account-role-"]').selectOption('c'.repeat(32));await card().getByRole('button',{name:'应用角色',exact:true}).click();await wait('accounts-state','已提交该 QQ');assert.equal(child.active_profile_id,'c'.repeat(32));assert.equal(primary.active_profile_id,'default');assert.equal(await page.locator('#active-profile').inputValue(),'default');assert(!calls.some(row=>/\/profiles\/.*\/activate$/.test(row.path)));checks.child_switch_preserves_primary=true;
+  await card().locator('details > summary').click();await card().locator('select[id^="account-copy-"]').selectOption('a'.repeat(32));await card().getByRole('button',{name:'复制角色',exact:true}).click();await wait('accounts-state','角色已复制');assert.equal(child.profiles.length,3);assert.equal(child.active_profile_id,'c'.repeat(32));checks.copy_does_not_activate=true;
+  await card().locator('[data-account-action="open"]').click();await wait('accounts-state','已在另一标签页打开');assert.equal(posts('/admin/accounts/'+childId+'/management').length,1);assert.equal(browser.contexts()[0].pages().length,1);checks.browser_open_scoped_to_child=true;
+  child.power_state='running';await page.locator('#refresh-accounts').click();await wait('accounts-state','已读取');page.once('dialog',dialog=>dialog.dismiss());await card().locator('[data-account-action="stop"]').click();assert.equal(posts('/admin/accounts/'+childId+'/stop').length,0);page.once('dialog',dialog=>dialog.accept());await card().locator('[data-account-action="stop"]').click();await wait('accounts-state','已请求关闭该账号');assert.equal(primary.power_state,'running');assert.equal(child.power_state,'stopping');assert.equal(await card().locator('[data-account-action="open"]').isDisabled(),false);assert(!(await page.locator('#accounts-state').innerText()).includes('已关闭'));child.power_state='stopped';await page.waitForFunction(id=>document.querySelector('[data-account-id="'+id+'"]').textContent.includes('Bot 已暂停'),childId);assert((await card().innerText()).includes('Bot 已暂停'));checks.child_stop_scoped_and_confirmed=true;checks.accepted_job_not_claimed_complete=true;
+  await page.locator('#accounts').screenshot({path:'/tmp/xzbot-accounts-offline.png'});
+  manager=false;await page.locator('#refresh-accounts').click();await wait('accounts-state','已读取');assert.equal(await page.locator('#account-create-panel').isVisible(),false);assert.equal(await page.locator('#account-list [data-account-action]').count(),0);assert.equal(await page.locator('#account-list .account-card').count(),1);const createCount=posts('/admin/accounts').length;await page.locator('#account-create-form').evaluate(form=>form.dispatchEvent(new Event('submit',{cancelable:true})));assert.equal(posts('/admin/accounts').length,createCount);checks.child_console_cannot_manage_others=true;
+  await page.locator('[data-tab="trajectories"]').click();await wait('trajectories-state','已读取');const list=await page.locator('#trajectory-list').innerText();assert(list.includes('这次到底是哪条问题？'));assert(list.includes('这是实际生成的回答'));assert(list.includes('决定保持安静'));assert(list.includes('未保存请求片段'));assert(!list.includes('FORGOTTEN_PRIVATE'));assert.equal(await page.locator('#trajectory-list img,#trajectory-list script').count(),0);checks.list_request_reply_silent_old_redacted=true;
+  await page.locator('#trajectory-list article').first().locator('button').click();await wait('trajectory-detail-state','详情已读取');const preview=page.locator('#trajectory-detail-content .trajectory-message-preview');assert((await preview.innerText()).includes('不等于已在 QQ 送达'));assert.equal((await preview.locator('.response-preview').innerText()).length,2000);assert((await preview.innerText()).includes('保存长度上限'));assert.equal(await preview.locator('script,img').count(),0);await page.locator('#trajectory-detail-panel').screenshot({path:'/tmp/xzbot-trace-preview-offline.png'});checks.bounded_detail_no_html_or_delivery_claim=true;
+  await page.locator('#trajectory-list article').last().locator('button').click();await wait('trajectory-detail-state','详情已读取');assert(!(await page.locator('#trajectory-detail-content').innerText()).includes('FORGOTTEN_PRIVATE'));checks.redacted_detail_hides_payload=true;
+  await page.locator('#trajectory-list article').filter({hasText:'续聊判断 #101'}).locator('button').click();await wait('trajectory-detail-state','详情已读取');let deliveryText=await page.locator('#trajectory-detail-content').innerText();assert((await page.locator('#trajectory-detail-title').innerText()).includes('调用成功 · 未发送'));assert(deliveryText.includes('生成的候选回答（未发送）'));assert(deliveryText.includes('此条消息含图片'));assert(deliveryText.includes('旧记录没有保留具体数值'));assert(deliveryText.includes('followup_low_confidence'));checks.legacy_rejection_and_image_trigger_visible=true;
+  await page.locator('#trajectory-list article').filter({hasText:'续聊判断 #102'}).locator('button').click();await wait('trajectory-detail-state','详情已读取');deliveryText=await page.locator('#trajectory-detail-content').innerText();assert(deliveryText.includes('置信度：0.7'));assert(deliveryText.includes('续聊门槛：0.8'));checks.confidence_and_final_outcome_separate=true;
+  await page.setViewportSize({width:390,height:844});manager=true;await page.locator('[data-tab="accounts"]').click();await wait('accounts-state','已读取');assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);await page.locator('[data-tab="trajectories"]').click();await wait('trajectories-state','已读取');assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);checks.mobile_layout=true;
+  assert.deepEqual(errors,[]);assert.equal(await page.evaluate(()=>localStorage.length+sessionStorage.length),0);assert(!calls.some(row=>/\/simulate|\/send|\/napcat/.test(row.path)));checks.no_real_calls_or_secret_storage=true;
+  console.log(JSON.stringify({offline:true,all_passed:true,checks}));
+ }finally{await browser.close();}
+})().catch(error=>{console.error('Offline accounts/trace preview failed at '+stage+': '+String(error.stack||error.message));process.exitCode=1;});

@@ -1,0 +1,6 @@
+name: astrbot_plugin_azusa_onebot
+display_name: XZBot 私人角色 OneBot 桥接
+desc: NapCat / OneBot v11 数字身份接入独立 XZBot 服务；默认关闭，群聊仅响应真实艾特或已知命令。
+version: 0.1.0
+author: private-local
+astrbot_version: ">=4.29.4,<4.30"

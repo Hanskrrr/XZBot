@@ -1,0 +1,14 @@
+{
+  "name": "qqbot-ui-checks",
+  "private": true,
+  "scripts": {
+    "test": "node integrations.cjs && node providers-knowledge.cjs && node profiles-memory.cjs && node group-memory.cjs && node memory-presets.cjs && node group-monitor-presets.cjs && node trajectories-owner-weibo.cjs && node bot-power-412.cjs && node knowledge-assets.cjs && node context-budget.cjs && node full-background.cjs && node vision-config.cjs && node prompt-navigation.cjs && node subscription-compat-cost.cjs && node accounts-trace-preview.cjs && node account-navigation.cjs && node subscription-multi-target.cjs && node subscription-library.cjs && node qq-connection.cjs && node group-idle-and-weibo-health.cjs && node conversation.cjs",
+    "test:live-readonly": "node integrations-live.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.65.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
