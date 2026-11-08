@@ -7,6 +7,7 @@ import pytest
 from azusa_bot.context_budget import DIRECT_PREFIX, FOLLOWUP_PREFIX, GROUP_PREFIX, estimate_tokens, fit_context
 from azusa_bot.trajectories import references, safe_image_references
 from azusa_bot.vision_prompt import attach_images, retained_events, visual_sources
+from azusa_bot.prompts import DEFAULTS
 
 
 def group_message(rows):
@@ -142,4 +143,4 @@ def test_earlier_picture_is_not_attached_to_current_text_and_trace_records_age()
     assert result[-1]==messages[-1]  # The current envelope is still plain text.
     assert result[-2]["content"][-1]["type"]=="image_url"
     assert metadata[0]["age_seconds"]==45 and metadata[0]["relation"]=="recent"
-    assert "较早消息" in result[-2]["content"][0]["text"]
+    assert result[-2]["content"][0]["text"] == DEFAULTS["earlier_image"]

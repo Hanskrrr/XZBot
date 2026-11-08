@@ -5,7 +5,7 @@ prepared text lives in memory, and an uncertain send is never retried.
 """
 from __future__ import annotations
 
-from .prompts import DEFAULTS as PROMPT_DEFAULTS, prompt
+from .prompts import DEFAULTS as PROMPT_DEFAULTS, prompt, with_persona
 
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -198,7 +198,8 @@ class IdleConversation:
                     refs["confidence_policy"]=confidence_policy
                     settings=settings.model_copy(update={"group_chat_confidence_threshold":confidence_policy["effective"]})
                     refs['_text_preview_allowed'] = engine._preview_context_allowed(candidate['scope'], context)
-                    policy = prompt(engine.content_root,"idle",settings) + prompt(engine.content_root,"knowledge",settings)+prompt(engine.content_root,"style",settings)+prompt(engine.content_root,"persona_header",settings)+persona+prompt(engine.content_root,"persona_footer",settings)
+                    policy = with_persona(engine.content_root,persona,'\n'.join(prompt(engine.content_root,key,settings)
+                        for key in ('idle','knowledge','style')),settings)
                     messages = [{'role':'system','content':policy}, {'role':'user','content':prompt(engine.content_root,"group_header",settings)+json.dumps(
                         {'recent_group_messages':context, 'lore':knowledge, 'available_expressions':[],
                          'latest_speaker_id':self_id, 'latest_speaker_own_memories':[]}, ensure_ascii=False)}]

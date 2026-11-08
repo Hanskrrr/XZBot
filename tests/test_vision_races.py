@@ -7,6 +7,7 @@ import httpx
 from PIL import Image
 import pytest
 
+from azusa_bot.prompts import DEFAULTS
 from azusa_bot.core import Engine, Incoming
 from azusa_bot.settings import Settings, private_write, write_settings
 from azusa_bot.vision import VisionCache
@@ -156,7 +157,7 @@ async def test_same_group_other_member_can_reference_picture_with_original_sende
     context = json.loads(provider.calls[0][1]["content"].split("\n", 1)[1])
     assert context["trusted_identity"]["user_id"] == "20002"
     labels = [part["text"] for message in provider.calls[0] if isinstance(message["content"], list)
-              for part in message["content"] if part["type"] == "text" and part["text"].startswith("视觉附件来源")]
+              for part in message["content"] if part["type"] == "text" and part["text"].startswith(DEFAULTS["image_label"])]
     source = json.loads(labels[0].split("：", 1)[1])
     assert source["user_id"] == "20001" and source["event_id"] == "1"
     assert engine.memory.recent_history(SCOPE, "20001") == []

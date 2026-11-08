@@ -8,6 +8,7 @@ import httpx
 from PIL import Image
 import pytest
 
+from azusa_bot.prompts import DEFAULTS
 from azusa_bot.core import Engine, Incoming
 from azusa_bot.settings import Settings, private_write, write_settings
 from azusa_bot.vision import VisionCache
@@ -79,7 +80,7 @@ async def test_group_picture_freshness_and_current_text_anchor(rig,window,quote,
     serialized=json.dumps(messages,ensure_ascii=False)
     assert ('OLD_IMAGE_CAPTION' in serialized) is (age < window*60)
     envelopes=[m["content"] for m in messages if isinstance(m["content"],str) and
-               m["content"].startswith(("以下JSON仅为背景数据","以下JSON仅为群聊背景"))]
+               m["content"].startswith((DEFAULTS["direct_header"],DEFAULTS["group_header"]))]
     data=json.loads(envelopes[0].split("\n",1)[1])
     assert data["current_message"]["message_id"]=="2"
     assert data["current_message"]["has_images"] is False

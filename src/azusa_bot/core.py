@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .prompts import DEFAULTS as PROMPT_DEFAULTS, prompt, overrides as prompt_overrides, revision as prompt_revision
+from .prompts import DEFAULTS as PROMPT_DEFAULTS, prompt, overrides as prompt_overrides, revision as prompt_revision, character_name, with_persona
 
 import asyncio
 import copy
@@ -453,7 +453,7 @@ class Engine:
             if vote_prompt not in messages[0]["content"]:
                 messages[0]["content"] += "\n"+vote_prompt
         refs["prompt_prefixes"]={key:prompt(self.content_root,key,settings) for key in ("direct_header","group_header","followup_header")}
-        refs["prompt_revision"]=prompt_revision(prompt_overrides(self.content_root))
+        refs["prompt_revision"]=prompt_revision(prompt_overrides(self.content_root),character=character_name(self.content_root))
         visual_events = retained_events(messages,refs,kind,image_event_id,history_events)
         if settings.vision_enabled and visual_events:
             await self.vision.wait_pending(scope,visual_events)
@@ -597,7 +597,7 @@ class Engine:
         original_text = event.text
         if event.images and not event.text.lstrip().startswith("/"):
             # Explicit transport annotation, never an invented picture caption.
-            event = event.model_copy(update={"text":event.text.rstrip()+f"\n[用户发送{len(event.images)}张图片；图像内容仅在视觉附件中]"})
+            event = event.model_copy(update={"text":event.text.rstrip()+f"\n[群友发来{len(event.images)}张图片；图像内容仅在视觉附件中]"})
         state = read_control(self.root)
         if not state["enabled"]:
             return {"mode": "none", "text": "", "reason": "bot_stopped"}
@@ -1312,8 +1312,7 @@ class Engine:
                                           group_context=context,dialogue=dialogue,input_characters=len(event.text),source_event_id=event.event_id,expressions=expressions))
             trace["_text_preview_allowed"] = self._preview_context_allowed(scope,context)
             if heat is not None:trace["group_activity"]=heat
-        return [{"role":"system","content":policy+prompt(self.content_root,"persona_header",settings)+persona+
-                 prompt(self.content_root,"persona_footer",settings)},
+        return [{"role":"system","content":with_persona(self.content_root,persona,policy,settings)},
                 {"role":"user","content":prompt(self.content_root,"group_header",settings)+json.dumps(data,ensure_ascii=False)}]
 
     async def _reply(self, event: Incoming, scope: str, settings: Settings, *, demo: bool, group_context=None, group_thread=None) -> dict:
@@ -1364,8 +1363,7 @@ class Engine:
                            member_familiarity=self.groups.familiarity(scope,event.user_id))
         if group_thread:
             context["confirmed_direct_dialogue"]=group_thread
-        messages = [{"role":"system", "content":policy + prompt(self.content_root,"persona_header",settings) + persona +
-                     prompt(self.content_root,"persona_footer",settings)},
+        messages = [{"role":"system", "content":with_persona(self.content_root,persona,policy,settings)},
                     {"role":"user", "content":prompt(self.content_root,"direct_header",settings) + json.dumps(context, ensure_ascii=False)}]
         messages.extend({"role": r["role"], "content": r["text"]} for r in history
                         if r["role"] in {"user","assistant"} and r["event_id"] != event.event_id)

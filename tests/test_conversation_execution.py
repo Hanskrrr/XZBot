@@ -2,6 +2,7 @@
 import json
 import pytest
 from azusa_bot import conversation_config as config, lore
+from azusa_bot.prompts import prompt
 from azusa_bot.core import Incoming
 from test_web_search import rig, event
 from test_app import http
@@ -29,7 +30,7 @@ async def test_examples_are_actual_pairs_before_context_without_becoming_memory(
     assert [(m['role'],m['content']) for m in model.calls[0][1:5]]==[
         ('user','例子里的问题'),('assistant',json.dumps({'text':'例子里的回答','mode':'text'},ensure_ascii=False)),
         ('user','第二个例子'),('assistant',json.dumps({'text':'第二个回应','mode':'text'},ensure_ascii=False))]
-    assert model.calls[0][5]['content'].startswith('以下JSON')
+    assert model.calls[0][5]['content'].startswith(prompt(engine.content_root,'direct_header',engine.settings()))
     engine.acknowledge(reply['reply_id'],'sent','900')
     assert '例子里的' not in str(engine.dialogue.get(reply['scope'],'20001',ttl_seconds=300))
     assert engine.memory.stats()['history']==0
@@ -68,7 +69,7 @@ async def test_loop_zero_rounds_and_single_call_never_searches(rig):
     model=Model([{'text':'现在没有查实。','web_search':{'query':'Python 版本'}}]);engine.provider_override=model
     reply=await engine.handle(event())
     assert reply['mode']=='text' and len(model.calls)==1 and not searches
-    assert '本轮资料查询已经结束' in model.calls[0][0]['content']
+    assert prompt(engine.content_root,'execution_done',engine.settings()) in model.calls[0][0]['content']
 
 
 def test_admin_validation_revision_profile_isolation_and_preview(http):

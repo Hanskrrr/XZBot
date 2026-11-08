@@ -146,7 +146,7 @@ async def test_name_keeps_semantic_checks_and_does_not_become_owner(named, answe
     assert reply["reason"] == reason and reply["mode"] == "none"
     assert not settings.is_owner("group", "30001", "20001", "onebot")
     prompt = provider.calls[0][0]["content"]
-    assert "单独喊名字也可以简短应声" in prompt and "不代表主人或任何管理权限" in prompt
+    assert "只喊一声名字也可以应一声" in prompt and "不等于有主人或管理权限" in prompt
     assert engine._named_candidates == {}
 
 
