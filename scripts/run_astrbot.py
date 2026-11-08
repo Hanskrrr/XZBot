@@ -1,15 +1,13 @@
 """Launch the pinned transport; QQ credentials exist only in process memory."""
 
 import copy
-import errno
 import os
 import runpy
-import socket
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(os.environ.get("AZUSA_ROOT", Path(__file__).resolve().parents[1])) / "src"))
-from azusa_bot.host import file_locks as fcntl
+from azusa_bot.host import file_locks as fcntl, require_free_loopback_port
 from azusa_bot.runtime_layout import runtime_layout
 layout = runtime_layout(Path(os.environ.get("AZUSA_ROOT", Path(__file__).resolve().parents[1])))
 os.environ["DASHBOARD_PORT"] = str(layout.core_port - 1)
@@ -25,13 +23,9 @@ try:
 except BlockingIOError:
     raise SystemExit("已有本项目 AstrBot 进程运行，已拒绝重复启动。") from None
 try:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.settimeout(1)
-        port_status = probe.connect_ex(("127.0.0.1", layout.core_port - 1))
-except OSError:
-    raise SystemExit(f"无法检查 {layout.core_port - 1} 端口，未连接 QQ。") from None
-if port_status not in {errno.ECONNREFUSED, getattr(errno,"WSAECONNREFUSED",10061)}:
-    raise SystemExit(f"{layout.core_port - 1} 端口已占用或无法检查，未连接 QQ。")
+    require_free_loopback_port(layout.core_port - 1)
+except OSError as error:
+    raise SystemExit(f"{layout.core_port - 1} 端口不可用（系统代码 {error.errno}），未连接 QQ。") from None
 
 from astrbot.core.platform.manager import PlatformManager
 

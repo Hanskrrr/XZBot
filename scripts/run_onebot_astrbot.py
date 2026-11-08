@@ -1,14 +1,12 @@
 """OneBot receiver only: no official QQ credentials or other adapters are loaded."""
 import copy
-import errno
 import os
 from pathlib import Path
 import runpy
-import socket
 import sys
 
 from prepare_onebot import ROOT, prepare
-from azusa_bot.host import file_locks as fcntl
+from azusa_bot.host import file_locks as fcntl, require_free_loopback_port
 from azusa_bot.runtime_layout import runtime_layout
 
 layout = runtime_layout(ROOT)
@@ -26,10 +24,10 @@ try:
 except BlockingIOError:
     raise SystemExit("普通 QQ 桥接已运行。") from None
 for port in (layout.dashboard_port, layout.onebot_port):
-    with socket.socket() as check:
-        check.settimeout(1)
-        if check.connect_ex(("127.0.0.1",port)) not in {errno.ECONNREFUSED, getattr(errno,"WSAECONNREFUSED",10061)}:
-            raise SystemExit("普通 QQ 桥接端口已占用或无法检查。")
+    try:
+        require_free_loopback_port(port)
+    except OSError as error:
+        raise SystemExit(f"普通 QQ 桥接端口 {port} 不可用（系统代码 {error.errno}）。") from None
 private_token = (ROOT / "data/onebot.token").read_text().strip()
 if len(private_token) < 32:
     raise SystemExit("缺少本机 OneBot 访问令牌。")

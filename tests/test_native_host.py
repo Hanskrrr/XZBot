@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import socket
 import sys
 import zipfile
 import pytest
@@ -11,6 +12,18 @@ from fastapi.testclient import TestClient
 from azusa_bot import host
 from azusa_bot.settings import private_write,token,Settings,write_settings
 from azusa_bot.app import create_app
+
+
+def test_listener_preflight_rejects_bound_and_listening_ports():
+    with socket.socket() as occupied:
+        occupied.bind(('127.0.0.1', 0))
+        port = occupied.getsockname()[1]
+        with pytest.raises(OSError):
+            host.require_free_loopback_port(port)
+        occupied.listen()
+        with pytest.raises(OSError):
+            host.require_free_loopback_port(port)
+    host.require_free_loopback_port(port)
 
 
 def test_private_file_open_and_permissions(tmp_path):

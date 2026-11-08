@@ -5,6 +5,7 @@ No process-global monkey-patching of os or security checks.
 """
 from pathlib import Path
 import os
+import socket
 import stat
 import time
 
@@ -14,6 +15,19 @@ NOFOLLOW = getattr(os, 'O_NOFOLLOW', 0)
 
 def python_at(venv):
     return Path(venv) / ('Scripts/python.exe' if WINDOWS else 'bin/python')
+
+
+def require_free_loopback_port(port):
+    """Preflight a listener by binding, not by timing a refused connection.
+
+    Windows can time out a loopback connect before reporting ECONNREFUSED.
+    Exclusive bind also rejects a socket that is bound but not yet listening.
+    The launcher's process lock remains responsible for duplicate launches.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        if WINDOWS:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        probe.bind(('127.0.0.1', port))
 
 
 def _win_identity():
