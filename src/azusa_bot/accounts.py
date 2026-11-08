@@ -216,8 +216,12 @@ class AccountManager:
                 connection = {'state':'unknown','message':'QQ 状态读取失败'}
         operation = self.operations.get(entry["id"], {})
         power = read_control(root)
+        from .qq_runtime import describe as describe_runtime
+        qq_runtime=describe_runtime(root)
+        runtime_ready=(qq_runtime['environment']=='external' or qq_runtime['prepared'].get(
+            qq_runtime['environment']+'_'+qq_runtime['adapter'],False))
         return dict(entry, core_port=runtime_layout(root).core_port, core_running=running, qq_connection=connection,
-            prepared=(root / "runtime/napcat-prepared.json").is_file(),
+            prepared=runtime_ready, qq_runtime=qq_runtime['environment']+'/'+qq_runtime['adapter'],
             busy=entry["id"] in self.tasks, operation=operation.get("operation", ""),
             error_code=operation.get("error_code", ""), qq_number=settings.onebot_self_id,
             active_profile_id=active["id"], active_profile_name=active["name"],

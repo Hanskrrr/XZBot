@@ -185,6 +185,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["download", "setup", "start", "stop", "shutdown", "status"])
     action = parser.parse_args().action
+    if action in {'setup','start'}:
+        from azusa_bot.qq_runtime import read
+        if read(ROOT)!={'schema':1,'environment':'lima','adapter':'napcat'}:
+            raise RuntimeError('当前未选择 Lima + NapCat，请通过管理页切换后再启动。')
+        from qq_runtime_action import assert_other_qq_stopped
+        assert_other_qq_stopped(ROOT)
     if action == "download":
         download()
         return

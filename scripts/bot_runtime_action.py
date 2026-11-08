@@ -80,6 +80,14 @@ def stop_bridge(root=ROOT):
 
 
 def stop():
+    from azusa_bot.qq_runtime import read
+    choice=read(ROOT)
+    if choice['environment']=='native' or choice['adapter']=='snowluma' and choice['environment']=='lima':
+        from qq_runtime_action import operate
+        with startup_guard(ROOT):
+            stop_bridge()
+            operate('stop')
+        return
     from azusa_bot.external_runtime import enabled
     if enabled(ROOT):
         with startup_guard(ROOT):stop_bridge()
@@ -101,6 +109,16 @@ def stop():
 
 
 def start():
+    from qq_runtime_action import assert_other_qq_stopped
+    assert_other_qq_stopped(ROOT)
+    from azusa_bot.qq_runtime import read
+    choice=read(ROOT)
+    if choice['environment']=='native' or choice['adapter']=='snowluma' and choice['environment']=='lima':
+        from qq_runtime_action import operate
+        with startup_guard(ROOT):
+            ensure_bridge(ROOT)
+            operate('start')
+        return
     from azusa_bot.external_runtime import enabled
     if enabled(ROOT):
         with startup_guard(ROOT):ensure_bridge(ROOT)
@@ -132,4 +150,5 @@ if __name__ == "__main__":
         start() if action == "start" else stop()
     except Exception as error:
         # Fixed categories only: never forward subprocess output or credentials.
-        raise SystemExit({"runtime_not_prepared": 20, "bridge_start_failed": 21}.get(str(error), 1)) from None
+        raise SystemExit({"runtime_not_prepared": 20, "bridge_start_failed": 21,
+                          "runtime_other_adapter_running":22}.get(str(error), 1)) from None

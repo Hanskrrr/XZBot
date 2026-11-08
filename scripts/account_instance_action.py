@@ -62,6 +62,14 @@ def main():
                 from prepare_onebot import prepare
                 prepare()
                 return
+            from azusa_bot.qq_runtime import read as read_runtime
+            choice=read_runtime(ROOT)
+            if choice['environment']=='native' or choice['adapter']=='snowluma':
+                from qq_runtime_action import operate
+                operate('start')
+                return
+            from qq_runtime_action import assert_other_qq_stopped
+            assert_other_qq_stopped(ROOT)
             if not vm_prepared(ROOT):
                 subprocess.run([str(python_at(ROOT / ".venv")), str(ROOT / "scripts/napcat_runtime.py"), "setup"], check=True)
             subprocess.run([str(python_at(ROOT / ".venv")), str(ROOT / "scripts/napcat_runtime.py"), "start"], check=True)

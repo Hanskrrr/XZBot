@@ -23,7 +23,7 @@ STATES = {"running", "starting", "stopping", "stopped", "error"}
 ERRORS = {"", "power_state_invalid", "power_transition_interrupted", "power_start_failed",
           "power_stop_failed", "power_runtime_unconfigured", "power_qq_login_required",
           "power_qq_identity_mismatch", "power_runtime_unavailable", "power_runtime_timeout",
-          "power_qq_binding_required", "power_runtime_not_prepared", "power_bridge_start_failed"}
+          "power_qq_binding_required", "power_runtime_not_prepared", "power_bridge_start_failed", "power_other_adapter_running"}
 
 
 def read_control(root: Path) -> dict:

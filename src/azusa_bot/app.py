@@ -718,10 +718,79 @@ def create_app(root: Path | None = None) -> FastAPI:
         body=await json_object(request)
         return {"notifications":subscriptions.fetch_claim(body.get("self_id"),limit=1)}
 
+    @app.get('/admin/runtime/choice', dependencies=[Depends(admin)])
+    def qq_runtime_choice():
+        from .qq_runtime import describe
+        return describe(root)
+
+    @app.put('/admin/runtime/choice', dependencies=[Depends(admin)])
+    async def qq_runtime_select(request: Request):
+        from .qq_runtime import read, save, validate, describe, local_listener_open
+        body=await json_object(request)
+        try:validate(body)
+        except ValueError as error:raise HTTPException(400,str(error)) from None
+        if body==read(root):return describe(root)
+        if body['environment']!='external' and not describe(root)['prepared'].get(body['environment']+'_'+body['adapter']):
+            raise HTTPException(409,'qq_runtime_not_prepared')
+        try:await power.stop()
+        except BotPowerError as error:raise HTTPException(503,str(error)) from None
+        async with power.lock:
+            if power.status()['enabled'] or power.status()['busy']:
+                raise HTTPException(409,'qq_runtime_stop_required')
+            # Also close a login-only runtime opened while the bot was paused.
+            try:await runtime.stop()
+            except BotPowerError as error:raise HTTPException(503,str(error)) from None
+            for port in (layout.napcat_port,layout.core_port+6):
+                if local_listener_open(port):
+                    raise HTTPException(409,'qq_runtime_previous_still_running')
+            try:save(root,body)
+            except ValueError as error:raise HTTPException(400,str(error)) from None
+            async with qq_connection.lock:qq_connection.runtime_changed()
+        return describe(root)
+
+    @app.post('/admin/runtime/open-login', dependencies=[Depends(admin)])
+    async def qq_runtime_open_login(request: Request):
+        from .external_runtime import enabled
+        if await json_object(request)!={}:raise HTTPException(400,'qq_runtime_invalid')
+        if enabled(root):raise HTTPException(409,'qq_runtime_external_launch_required')
+        async with power.lock:
+            if power.status()['busy']:raise HTTPException(409,'qq_runtime_stop_required')
+            # Mark the login-only runtime as needing attention so Close always stops it.
+            if not power.status()['enabled']:power._write('error','power_qq_login_required')
+            try:await runtime._run('start')
+            except BotPowerError as error:raise HTTPException(503,str(error)) from None
+        return {'ok':True,'reply_enabled':power.status()['enabled']}
+
+    @app.get('/admin/runtime/config', dependencies=[Depends(admin)])
+    def qq_runtime_config():
+        from .external_runtime import connection_archive
+        from .qq_runtime import read
+        name=read(root)['adapter']
+        return Response(connection_archive(root),media_type='application/zip',headers={
+            'Content-Disposition':f'attachment; filename="xzbot-{name}-private-config.zip"','Cache-Control':'no-store'})
+
+    @app.post('/admin/runtime/snowluma-access', dependencies=[Depends(admin)])
+    async def qq_runtime_local_access(request: Request):
+        from .qq_runtime import read
+        from .host import private_path
+        body=await json_object(request)
+        if set(body)!={'kind'} or body['kind'] not in {'webui','desktop'}:
+            raise HTTPException(400,'qq_runtime_invalid')
+        if read(root)!= {'schema':1,'environment':'lima','adapter':'snowluma'}:
+            raise HTTPException(409,'snowluma_local_access_unavailable')
+        path=root/'data/snowluma-access.json'
+        try:
+            if not private_path(path) or path.stat().st_size>2048:raise ValueError()
+            value=json.loads(path.read_text())[body['kind']]
+            if not isinstance(value,str) or not 8<=len(value)<=128:raise ValueError()
+        except (OSError,ValueError,KeyError):raise HTTPException(409,'snowluma_local_access_unavailable') from None
+        return JSONResponse({'value':value},headers={'Cache-Control':'no-store'})
+
     @app.get("/admin/runtime/external", dependencies=[Depends(admin)])
     def external_runtime_status():
         from .external_runtime import enabled
-        return {"external":enabled(root),"onebot_port":layout.onebot_port,"napcat_port":layout.napcat_port}
+        from .qq_runtime import read
+        return {"external":enabled(root),"onebot_port":layout.onebot_port,"napcat_port":layout.napcat_port,**read(root)}
 
     @app.get("/admin/runtime/external/config", dependencies=[Depends(admin)])
     def external_runtime_config():

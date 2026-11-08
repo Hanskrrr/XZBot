@@ -668,10 +668,10 @@ class AzusaOneBot(Star):
                         raise ValueError("OneBot delivery receipt unavailable")
                     delivered_message_id = message_id(receipt.get("message_id"))
                 ack_status = "sent"
-        except Exception:
+        except Exception as error:
             # Never log request/response bodies, member IDs, tokens, or exceptions.
             # A timeout/missing receipt must not trigger a retry or text fallback.
-            logger.warning("XZBot OneBot bridge failed; delivery requires local review")
+            logger.warning("XZBot OneBot delivery unconfirmed: %s", classify_send_error(error))
         finally:
             if reply_id:
                 try:

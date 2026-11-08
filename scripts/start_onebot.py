@@ -181,9 +181,18 @@ def open_management(root: Path):
 
 
 def start_vm(root: Path):
+    from qq_runtime_action import assert_other_qq_stopped
+    assert_other_qq_stopped(root)
+    from azusa_bot.qq_runtime import read
+    choice=read(root)
+    if choice['environment']=='native' or choice['adapter']=='snowluma' and choice['environment']=='lima':
+        result=subprocess.run([str(python_at(root/'.venv')),str(root/'scripts/qq_runtime_action.py'),'start'],
+            cwd=root,env={**os.environ,'AZUSA_ROOT':str(root)},stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=120)
+        if result.returncode:raise RuntimeError('所选 QQ 环境尚未就绪，请在连接与权限中检查。')
+        return
     from azusa_bot.external_runtime import enabled
     if enabled(root):
-        print('Native NapCat is managed separately. See the connection page.',flush=True)
+        print('所选 QQ 适配器由外部管理，请查看连接页面。',flush=True)
         return
     if not vm_prepared(root):
         print("隔离 QQ 环境尚未准备完成。已打开管理页；此入口不会下载或安装虚拟机。", flush=True)

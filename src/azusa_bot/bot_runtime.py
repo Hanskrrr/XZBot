@@ -10,6 +10,7 @@ from .native_process import terminate_helper
 
 from .bot_control import BotPowerError
 from .napcat_admin import NapCatAdmin, NapCatError
+from .qq_runtime import make_admin
 from .settings import read_settings
 
 
@@ -52,7 +53,7 @@ class NativeBotRuntime:
                 raise
             raise BotPowerError("power_runtime_timeout") from None
         if code != 0:
-            raise BotPowerError({20: "power_runtime_not_prepared", 21: "power_bridge_start_failed"}.get(
+            raise BotPowerError({20: "power_runtime_not_prepared", 21: "power_bridge_start_failed",22:"power_other_adapter_running"}.get(
                 code, "power_runtime_unavailable"))
 
     async def stop(self):
@@ -68,7 +69,7 @@ class NativeBotRuntime:
             raise BotPowerError("power_qq_binding_required")
         await self._run("start")
         last = "power_qq_login_required"
-        admin = NapCatAdmin(self.root)
+        admin = make_admin(self.root)
         deadline = asyncio.get_running_loop().time() + 45
         while asyncio.get_running_loop().time() < deadline:
             try:

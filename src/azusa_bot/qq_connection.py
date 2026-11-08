@@ -6,9 +6,13 @@ from contextlib import closing
 import time
 
 from .napcat_admin import NapCatAdmin, NapCatError
+from .qq_runtime import make_admin
 from .settings import read_settings, private_write
 
 LABELS = {
+    'snowluma_unavailable':'尚未取得 SnowLuma 的 QQ 状态；请检查 QQ 登录及 OneBot 状态接口，程序启动不代表账号在线',
+    'snowluma_auth_failed':'SnowLuma 状态接口令牌不匹配，请重新导入本账号连接配置',
+    'snowluma_invalid_response':'SnowLuma 未返回可靠的 QQ 状态，不能确认在线',
     'online':'QQ 接口报告在线，消息通道已连接；这不保证腾讯端实际收发正常', 'qq_offline':'QQ 已离线',
     'delivery_degraded':'QQ 接口报告在线，但最近连续发送未取得可靠回执；消息可能已经送达，请在 QQ 核对。此状态不等于已离线或被风控',
     'login_required':'QQ 需要登录', 'login_initializing':'QQ 登录正在初始化',
@@ -36,7 +40,7 @@ class QQConnection:
         self.bridge_at = None
         self.previous = None
         self.path = root/'data/qq-connection-events.json'
-        self.admin = NapCatAdmin(root)
+        self.admin = make_admin(root)
         self.events = []
         self.traffic_cache = None
         self.traffic_at = None
@@ -46,6 +50,11 @@ class QQConnection:
                                and row.get('reason_code') in LABELS and type(row.get('at')) in (int,float)][-40:]
             except (ValueError,TypeError):
                 pass
+
+    def runtime_changed(self):
+        self.admin = make_admin(self.root)
+        self.login = self.login_at = self.bridge = self.bridge_at = self.previous = None
+        self.traffic_cache = self.traffic_at = None
 
     def traffic(self, self_id):
         """Read receipt metadata only; quiet groups never count as offline.

@@ -207,6 +207,13 @@ def restore_bundle(bundle,destination):
             # The Mac source may explicitly select Lima. A Linux receiver must
             # use its native NapCat connection, not inherit that host setting.
             private_write(target/'config/runtime.json',json.dumps({'mode':'lima' if platform.system()=='Darwin' else 'external'}))
+            runtime_choice=target/'config/qq-runtime.json'
+            if runtime_choice.exists():
+                from .qq_runtime import read as read_runtime
+                choice=read_runtime(target)
+                # Runtime binaries and QQ login sessions are never in a migration bundle.
+                choice['environment']='external'
+                private_write(runtime_choice,json.dumps(choice))
             # Default-off is a persistent activity gate, retaining all user's
             # individual switches, subscription targets and whitelist values.
             private_write(target/'data/bot-control.json',json.dumps({'schema':1,'state':'stopped','epoch':uuid.uuid4().hex,'updated_at':time.time(),'error_code':''}))

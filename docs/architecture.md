@@ -1,7 +1,7 @@
 # 架构
 
 ```text
-QQ / NapCat → OneBot 11 → 固定版本 AstrBot + 接入插件
+QQ / NapCat 或 SnowLuma → OneBot 11 → 固定版本 AstrBot + 接入插件
                                   ↓ 已认证事件 / 发送回执
                          XZBot Python 核心
                          ├─ 权限、账号与 Profile
