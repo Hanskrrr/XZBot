@@ -7,6 +7,8 @@ from contextlib import closing
 import hashlib
 import json
 import os
+import platform
+import re
 from pathlib import Path, PurePosixPath
 import shutil
 import sqlite3
@@ -132,7 +134,10 @@ def export_bundle(root,output,*,credential_reader=collect_credentials):
         private_write(stage/'bundle.json',json.dumps(info,ensure_ascii=False,indent=2))
         guide=root/'docs/public-migration.md'
         if not guide.exists():guide=root/'docs/handoffs/muse-private-migration.md'
-        copy_file(guide,stage/'START-HERE-MUSE.md')
+        # The entry is at the archive root; its original documentation links
+        # were relative to project/docs rather than this location.
+        guide_text=re.sub(r'\]\(([A-Za-z0-9_-]+\.md)\)', r'](project/docs/\1)', guide.read_text())
+        private_write(stage/'START-HERE-MUSE.md',guide_text)
         private_write(stage/'integrity.json',json.dumps({p.relative_to(stage).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(stage.rglob('*')) if p.is_file()},indent=2))
         # Zip is private, not encrypted; its sensitive nature is explicit in its
         # name and manifest. No upload is performed by this operation.
@@ -195,8 +200,13 @@ def restore_bundle(bundle,destination):
                 private_write(target/'data/legacy-official-credentials.json',json.dumps(payload['legacy_official']))
             cfg=json.loads((target/'config/local.json').read_text());cfg['read_existing_dsh']=False
             for key,value in payload.get('effective_voice',{}).items():
-                if not cfg.get(key) and value:cfg[key]=value
+                if value:cfg[key]=value
+            if payload.get('effective_voice',{}).get('fish_model'):
+                cfg['fish_model_override']=True
             private_write(target/'config/local.json',json.dumps(cfg,ensure_ascii=False,indent=2))
+            # The Mac source may explicitly select Lima. A Linux receiver must
+            # use its native NapCat connection, not inherit that host setting.
+            private_write(target/'config/runtime.json',json.dumps({'mode':'lima' if platform.system()=='Darwin' else 'external'}))
             # Default-off is a persistent activity gate, retaining all user's
             # individual switches, subscription targets and whitelist values.
             private_write(target/'data/bot-control.json',json.dumps({'schema':1,'state':'stopped','epoch':uuid.uuid4().hex,'updated_at':time.time(),'error_code':''}))

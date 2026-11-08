@@ -31,7 +31,11 @@ def make_source(tmp_path):
   (directory/'data').mkdir(mode=0o700,parents=True,exist_ok=True);(directory/'data').chmod(0o700)
   write_settings(directory,Settings(transport='onebot',onebot_self_id='10001' if directory==root else '10002',onebot_allowed_groups=['30001'],fish_reference_id='synthetic-voice'))
   private_write(directory/'config/group-presets.json','{"version":1,"presets":[]}')
+  private_write(directory/'config/runtime.json','{"mode":"lima"}')
+  private_write(directory/'config/memory-presets.json','{"version":1,"presets":[]}')
   private_write(directory/'content/persona.md','独立角色文本')
+  private_write(directory/'content/prompts.json','{"synthetic":"角色提示词"}')
+  private_write(directory/'content/conversation.json','{"synthetic":"预设对话"}')
   private_write(directory/'data/profiles.json',json.dumps({'schema':1,'active_id':'default','profiles':[{'id':'default'},{'id':PROFILE}]}))
   private_write(directory/'data/admin.token',SECRET)
   private_write(directory/'data/profiles'/PROFILE/'content/persona.md','额外的合成角色')
@@ -47,7 +51,7 @@ def make_source(tmp_path):
 
 def fake_credentials(root):
  return {'schema':1,'entries':[{'name':'deepseek_key','value':SECRET,'base_url':''},{'name':'compatible_key','value':SECRET+'-compatible','base_url':'https://example.test/v1'}],
-         'effective_voice':{},'legacy_official':{}}
+         'effective_voice':{'fish_model':'effective-legacy-model','fish_reference_id':'effective-voice'},'legacy_official':{}}
 
 
 def test_roundtrip_includes_every_profile_credential_and_preserves_source(tmp_path,monkeypatch):
@@ -60,6 +64,7 @@ def test_roundtrip_includes_every_profile_credential_and_preserves_source(tmp_pa
   assert not any('/runtime/qq-login' in n or n.endswith('.log') or '-wal' in n for n in z.namelist())
   z.extractall(tmp_path/'unpacked')
  bundle=tmp_path/'unpacked/XZBot-muse';assert verify_bundle(bundle)['contains_secrets']
+ monkeypatch.setattr('azusa_bot.migration.platform.system',lambda:'Linux')
  dest=tmp_path/'restored';restored=restore_bundle(bundle,dest)
  assert restored['all_accounts_paused'] and SECRET not in json.dumps(restored)
  assert AccountRegistry(dest).get(SECOND)[1]==dest/'accounts'/SECOND
@@ -72,6 +77,13 @@ def test_roundtrip_includes_every_profile_credential_and_preserves_source(tmp_pa
   for p in [directory,directory/'data/profiles'/PROFILE]:
    with sqlite3.connect(p/'data/memory.sqlite3') as db:assert db.execute('select count(*) from history').fetchone()[0]==1
   assert (directory/'config/group-presets.json').exists()
+  assert (directory/'config/memory-presets.json').exists()
+  assert json.loads((directory/'config/runtime.json').read_text())=={'mode':'external'}
+  settings=json.loads((directory/'config/local.json').read_text())
+  assert settings['fish_model']=='effective-legacy-model' and settings['fish_model_override']
+  assert settings['fish_reference_id']=='effective-voice'
+  assert (directory/'content/prompts.json').read_text()=='{"synthetic":"角色提示词"}'
+  assert (directory/'content/conversation.json').read_text()=='{"synthetic":"预设对话"}'
   assert (directory/'data/admin.token').read_text()==SECRET
  assert read_control(root)['enabled']  # Export did not stop the original.
  with pytest.raises(ValueError,match='destination_exists'):restore_bundle(bundle,dest)
