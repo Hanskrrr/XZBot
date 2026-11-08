@@ -14,7 +14,7 @@ jobs:
         include:
           - os: windows-2022
             platform: windows
-          - os: macos-14
+          - os: macos-15
             platform: macos
           - os: ubuntu-24.04
             platform: linux

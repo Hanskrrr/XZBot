@@ -83,7 +83,8 @@ def safe_open(path, flags, mode=0o600):
     security.SECURITY_DESCRIPTOR.SetSecurityDescriptorOwner(_win_identity(),False)
     try:
         handle=win32file.CreateFile(str(path),access,win32con.FILE_SHARE_READ|win32con.FILE_SHARE_WRITE|win32con.FILE_SHARE_DELETE,
-            security,creation,win32con.FILE_FLAG_OPEN_REPARSE_POINT,None)
+            security,creation,0x00200000  # FILE_FLAG_OPEN_REPARSE_POINT
+            ,None)
     except pywintypes.error as error:
         code=error.winerror
         if code in (2,3):raise FileNotFoundError(str(path)) from None
@@ -91,7 +92,7 @@ def safe_open(path, flags, mode=0o600):
         if code==5:raise PermissionError(str(path)) from None
         raise OSError('private_file_open_failed') from None
     try:
-        if win32file.GetFileInformationByHandle(handle)[0] & win32con.FILE_ATTRIBUTE_REPARSE_POINT:
+        if win32file.GetFileInformationByHandle(handle)[0] & stat.FILE_ATTRIBUTE_REPARSE_POINT:
             raise OSError('private_path_reparse_point')
         fd=msvcrt.open_osfhandle(handle.Detach(),flags | os.O_BINARY)
         if flags & os.O_TRUNC:os.ftruncate(fd,0)
@@ -127,9 +128,9 @@ def link_directory(link, target):
     """Windows junctions need no Developer Mode; never copy login data."""
     link,target=Path(link),Path(target).resolve(strict=WINDOWS)
     if WINDOWS:
-        import subprocess
+        import _winapi
         if link.exists():raise FileExistsError(str(link))
-        # cmd is necessary for mklink; reject its metacharacters before quoting.
-        if any(c in str(link)+str(target) for c in '&|<>^%!\r\n"'):raise ValueError('junction_path_invalid')
-        subprocess.run(['cmd.exe','/d','/c',f'mklink /J "{link}" "{target}"'],check=True,capture_output=True)
+        # CPython 3.12 exposes the native junction primitive; no shell quoting
+        # or Developer Mode is needed, including paths containing spaces.
+        _winapi.CreateJunction(str(target),str(link))
     else:link.symlink_to(target,target_is_directory=True)
