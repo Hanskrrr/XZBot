@@ -33,7 +33,9 @@ def build(target,uv,out):
                 item=zipfile.ZipInfo(base+'/'+info.filename);item.external_attr=info.external_attr;item.compress_type=zipfile.ZIP_DEFLATED
                 package.writestr(item,z.read(info))
             entry=zipfile.ZipInfo(base+'/Start-XZBot.'+suffix);entry.external_attr=0o100755<<16;entry.compress_type=zipfile.ZIP_DEFLATED
-            launcher=z.read('scripts/release/Start-XZBot.'+suffix)
+            # git archive honors eol attributes on the exporting host as well.
+            # Normalize first so a CRLF input never becomes CRCRLF.
+            launcher=z.read('scripts/release/Start-XZBot.'+suffix).replace(b'\r\n',b'\n').replace(b'\r',b'\n')
             package.writestr(entry,launcher.replace(b'\n',b'\r\n') if target=='windows' else launcher)
             binary=zipfile.ZipInfo(base+'/tools/'+('uv.exe' if target=='windows' else 'uv'));binary.external_attr=0o100755<<16;binary.compress_type=zipfile.ZIP_DEFLATED
             package.writestr(binary,uv.read_bytes())
@@ -41,6 +43,15 @@ def build(target,uv,out):
                 package.writestr(base+'/tools/uv-'+license,(ROOT/'dist'/('uv-'+license)).read_bytes())
             package.writestr(base+'/RELEASE-INFO.json',json.dumps({'version':version,'platform':target,'arch':arch,'commit':commit,'private_data_included':False},indent=2))
             package.writestr(base+'/READ-ME-FIRST.md',z.read('docs/releases.md'))
+    with zipfile.ZipFile(destination) as verify:
+        launcher=verify.read(base+'/Start-XZBot.'+suffix)
+        if target=='windows':
+            assert b'\r\n' in launcher and b'\r\r\n' not in launcher
+            assert verify.read(base+'/tools/uv.exe').startswith(b'MZ')
+        else:
+            assert b'\r' not in launcher
+            assert verify.getinfo(base+'/Start-XZBot.'+suffix).external_attr >> 16 & 0o111
+        assert verify.testzip() is None
     digest=hashlib.sha256(destination.read_bytes()).hexdigest()
     destination.with_suffix('.zip.sha256').write_text(digest+'  '+destination.name+'\n')
     print(destination.name)

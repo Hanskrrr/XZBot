@@ -76,3 +76,6 @@ jobs:
           三系统原生安装、核心与桥接启动检查通过才发布；CI 不登录 QQ，目标系统的真实 QQ/语音收发仍需现场验收。解压后请阅读 READ-ME-FIRST.md。SHA256 校验文件与 ZIP 同时提供。
           NOTES
           gh release create "$TAG" release-assets/* --title "XZBot $TAG — Windows / macOS / Linux" --notes-file release-notes.md --prerelease --verify-tag
+          if [ "$TAG" = 'v0.9.0-rc.2' ]; then
+            gh release edit v0.9.0-rc.1 --title 'XZBot v0.9.0-rc.1 — 已由 RC2 替代' --notes 'Windows 启动脚本的重复换行已在 RC2 修正。请使用 https://github.com/Hanskrrr/XZBot/releases/tag/v0.9.0-rc.2 。'
+          fi
