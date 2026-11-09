@@ -31,7 +31,7 @@ from .credential_store import CredentialStoreError
 from .settings import QQ_ID_PATTERN, Settings, read_settings
 from .trajectories import references as trace_references, TrajectorySourceErased
 from .bot_control import activity_allowed, read_control
-from .context_budget import fit_context, estimate_tokens
+from .context_budget import fit_context, fit_retry, estimate_tokens
 from .vision import VisionCache
 from .vision_prompt import VISION_POLICY, retained_events, attach_images, visual_sources
 from .group_addressing import is_addressed
@@ -40,6 +40,8 @@ from .accounts import AccountError, managed_qq_ids
 log = logging.getLogger("azusa")
 ID = r"^[A-Za-z0-9_-]+$"
 GROUP_COMMANDS = {"/帮助", "/隐私", "/身份", "/记忆", "/记住", "/群记住", "/事件", "/关系", "/忘记", "/纠正", "/忘记我", "/语音", "/文字", "/表情", "/旁听", "/订阅"}
+# Requests that ended locally on purpose; reported as-is, never as a cloud failure.
+LOCAL_STOP_REASONS = frozenset({"bot_stopped","cloud_budget","context_budget_exceeded","context_retry_budget","privacy_context_changed"})
 
 
 class _GeneratedContextChanged(ProviderError):
@@ -632,12 +634,11 @@ class Engine:
                 if isinstance(exc,ProviderError) and code == "context_length_exceeded" and attempt == 1 and kind!="group_topic":
                     # Never retry an identical prompt, a generic 400, an outage,
                     # or incomplete output. A second attempt gets its own trace.
-                    smaller = fit_context(prepared["messages"],prepared["refs"],kind=kind,
-                        window_tokens=max(4096,settings.context_window_tokens//2),
+                    smaller = fit_retry(prepared["messages"],prepared["refs"],kind=kind,
+                        window_tokens=settings.context_window_tokens,
                         output_tokens=700 if kind == "summary" else 1200,image_tokens=image_tokens,example_tokens=example_tokens,
                         render_messages=render_request)
-                    if (not smaller["blocked"] and
-                            smaller["metrics"]["estimated_after"] < prepared["metrics"]["estimated_after"]):
+                    if smaller is not None:
                         prepared, parent, number = smaller, number, None
                         continue
                 raise
@@ -766,7 +767,7 @@ class Engine:
                 result = await self._reply(event, scope, settings, demo=demo)
             except ProviderError as exc:
                 self.provider_failure(exc,settings)
-                result = {"mode": "none", "text": "", "reason":str(exc) if str(exc) in {"bot_stopped","cloud_budget","context_budget_exceeded","context_retry_budget","privacy_context_changed"} else "cloud_failure"}
+                result = {"mode": "none", "text": "", "reason":str(exc) if str(exc) in LOCAL_STOP_REASONS else "cloud_failure"}
             except (ValueError, PermissionError):
                 result = {"mode": "text", "text": "操作未完成，请检查指令和权限。"}
             except Exception:
@@ -1041,7 +1042,7 @@ class Engine:
                     trigger="followup",scope=scope,user=event.user_id,refs=trace_data,context_generation=context_generation,
                     image_event_id=event.event_id,request_text=event.text)
         except ProviderError as exc:
-            if str(exc) in {"bot_stopped","cloud_budget","context_budget_exceeded","context_retry_budget","privacy_context_changed"}:
+            if str(exc) in LOCAL_STOP_REASONS:
                 self.provider_failure(exc,settings)
                 return quiet("followup_policy_changed" if isinstance(exc,_GeneratedContextChanged) else str(exc))
             self.provider_failure(exc,settings)
@@ -1195,7 +1196,7 @@ class Engine:
                         result=await self._reply(event,scope,settings,demo=demo,group_context=self._group_snapshot(scope,settings),group_thread=dialogue)
                 except ProviderError as exc:
                     self.provider_failure(exc,settings)
-                    result={"mode":"none","text":"","reason":str(exc) if str(exc) in {"bot_stopped","cloud_budget","context_budget_exceeded","context_retry_budget","privacy_context_changed"} else "cloud_failure"}
+                    result={"mode":"none","text":"","reason":str(exc) if str(exc) in LOCAL_STOP_REASONS else "cloud_failure"}
                 except (ValueError,PermissionError):
                     result={"mode":"text","text":"操作未完成，请检查指令和权限。"}
                 if not self._group_allowed_now(event,demo=demo):
@@ -1273,7 +1274,7 @@ class Engine:
                         trigger="group_observation",scope=scope,user=event.user_id,refs=trace_data,context_generation=context_generation,
                         image_event_id=event.event_id,request_text=event.text)
             except ProviderError as exc:
-                if str(exc) in {"bot_stopped","cloud_budget","context_budget_exceeded","context_retry_budget","privacy_context_changed"}:
+                if str(exc) in LOCAL_STOP_REASONS:
                     self.provider_failure(exc,settings)
                     return quiet("context_changed_during_generation" if isinstance(exc,_GeneratedContextChanged) else str(exc))
                 self.provider_failure(exc,settings)

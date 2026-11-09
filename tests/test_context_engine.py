@@ -107,6 +107,23 @@ async def test_explicit_context_error_retries_once_with_smaller_prompt_and_own_t
 
 
 @pytest.mark.asyncio
+async def test_long_persona_above_half_window_still_retries_with_optional_context_removed(rig):
+    engine, provider, settings = rig
+    # Fixed instructions alone exceed half the window, so the half-window
+    # target is unreachable; recovery must still drop the optional history.
+    private_write(engine.content_root/"content/persona.md","完整核心设定"*350)
+    seed(engine); provider.errors = ["context_length_exceeded"]
+    reply = await engine.handle(event())
+    assert reply["mode"] == "text" and len(provider.calls) == 2
+    first,second = (call[0] for call in provider.calls)
+    assert first[0] == second[0] and "完整核心设定"*350 in second[0]["content"]
+    assert len(dialogue(second)) < len(dialogue(first))
+    budget = engine.trajectories.list()["items"][0]["context_budget"]
+    assert budget["attempt"] == 2 and not budget["blocked"]
+    assert settings.context_window_tokens//2 < budget["window_tokens"] < settings.context_window_tokens
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("code",["deepseek_http_400","deepseek_http_429","deepseek_http_503","generation_length_limit"])
 async def test_other_provider_failures_never_trigger_compression_retry(rig,code):
     engine, provider, _ = rig

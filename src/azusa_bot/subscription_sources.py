@@ -277,16 +277,21 @@ def _weibo_time(value, now):
         return int(parsed.timestamp())
     # Date-only values are historical, and deliberately cannot imply a new
     # event within the fifteen-minute push window.
-    for form in ("%Y-%m-%d %H:%M", "%m-%d %H:%M", "%Y-%m-%d", "%m-%d"):
+    for form in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
-            parsed = datetime.strptime(value, form).replace(tzinfo=local.tzinfo)
-            if form.startswith("%m-%d"):
-                parsed = parsed.replace(year=local.year)
-                if parsed > local:
-                    parsed = parsed.replace(year=local.year-1)
-            return int(parsed.timestamp())
+            return int(datetime.strptime(value, form).replace(tzinfo=local.tzinfo).timestamp())
         except ValueError:
             pass
+    # Year-less labels mean the latest such date not in the future. The year
+    # is part of the parse, so 02-29 resolves to the last leap year.
+    for form in ("%m-%d %H:%M", "%m-%d"):
+        for year in (local.year, local.year-1):
+            try:
+                parsed = datetime.strptime(f"{year}-{value}", "%Y-"+form).replace(tzinfo=local.tzinfo)
+            except ValueError:
+                continue
+            if parsed <= local:
+                return int(parsed.timestamp())
     raise ValueError()
 
 

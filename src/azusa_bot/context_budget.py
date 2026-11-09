@@ -360,3 +360,26 @@ def fit_context(messages, refs, *, kind, window_tokens=32768, output_tokens=1200
                "estimator": "utf8_upper_estimate", "removed": removed,
                "trimmed": any(removed.values()), "blocked": blocked}
     return {"messages": fitted, "refs": fitted_refs, "metrics": metrics, "blocked": blocked}
+
+
+def fit_retry(messages, refs, *, kind, window_tokens, **options):
+    """A strictly smaller copy of a request the provider rejected as too long.
+
+    The retry aims for half the configured window. A long persona plus fixed
+    instructions can exceed that target on their own; the retry then settles
+    for the smallest window that still holds them, so recovery still drops
+    optional context instead of being skipped. Returns None when nothing
+    optional is left to remove, because an identical prompt is never resent.
+    """
+    reserve = sum(options.get(key, default) for key, default in
+                  (("output_tokens", 1200), ("safety_tokens", 1024), ("image_tokens", 0), ("example_tokens", 0)))
+    smaller = fit_context(messages, refs, kind=kind, window_tokens=max(4096, window_tokens // 2), **options)
+    if smaller["blocked"]:
+        floor = smaller["metrics"]["estimated_after"] + reserve
+        if floor >= window_tokens:
+            return None
+        smaller = fit_context(messages, refs, kind=kind, window_tokens=floor, **options)
+    metrics = smaller["metrics"]
+    if smaller["blocked"] or metrics["estimated_after"] >= metrics["estimated_before"]:
+        return None
+    return smaller
