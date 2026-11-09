@@ -75,7 +75,7 @@ python scripts/build_update_feed.py dist/release
 
 ### 自动同步 Release（一次配置）
 
-仓库已提供 **Sync Gitee release** 工作流。三端构建、验证及 GitHub 发布成功后会直接调用它；手工发布或修改 GitHub 发行说明也会触发。不能只依赖 `release` 事件：由 GitHub 内置 `GITHUB_TOKEN` 创建的发行版不会再次触发普通 Release 工作流。
+仓库已提供 **Sync Gitee release** 工作流。三端构建、验证及 GitHub 发布成功后会直接调用它；手工发布或修改 GitHub 发行说明也会触发。向 `main` 提交同步脚本或本工作流的修复时，会自动核对并补同步最新发行版。不能只依赖 `release` 事件：由 GitHub 内置 `GITHUB_TOKEN` 创建的发行版不会再次触发普通 Release 工作流。
 
 1. 在 Gitee「设置 → 私人令牌」创建仅含仓库所需 **projects** 权限的令牌。令牌所属账号需要能发布目标仓库的 Release；不要放入聊天、源码、普通 Actions Variable 或 Bot 配置。
 2. 在 GitHub 仓库「Settings → Secrets and variables → Actions → New repository secret」添加 **`GITEE_TOKEN`**。过期或撤销后在这里替换即可，读者下载不需要此令牌。

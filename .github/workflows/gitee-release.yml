@@ -1,5 +1,10 @@
 name: Sync Gitee release
 on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/gitee-release.yml
+      - scripts/sync_gitee_release.py
   workflow_call:
     inputs:
       tag:
