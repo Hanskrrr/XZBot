@@ -64,6 +64,22 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
+      - name: Match verified assets to this release commit
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          reports=list(Path('release-assets').glob('*.verification.json'))
+          assert len(reports)==3
+          data=[json.loads(p.read_text()) for p in reports]
+          assert {r['platform'] for r in data}=={'windows','macos','linux'}
+          for path,report in zip(reports,data):
+              assert report['commit']==os.environ['GITHUB_SHA']
+              assert 'v'+report['version'].replace('rc','-rc.')==os.environ['GITHUB_REF_NAME']
+              assert all(report[k]=='passed' for k in ('archive_install_test','core_bridge_test','unicode_directory_test'))
+              archive=path.with_name(path.name.replace('.verification.json','.zip'))
+              assert hashlib.sha256(archive.read_bytes()).hexdigest()==report['zip_sha256']
+          PY
       - name: Publish verified platform assets
         env:
           GH_TOKEN: ${{ github.token }}
