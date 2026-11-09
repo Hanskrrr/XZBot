@@ -31,6 +31,10 @@ class SyncError(Exception):
     """Only locally defined, credential-free codes may be shown in CI logs."""
 
 
+class IncompleteUpload(SyncError):
+    """The sender timed out before even file_size bytes of the body were sent."""
+
+
 def require(condition, code):
     if not condition:
         raise SyncError(code)
@@ -132,9 +136,10 @@ def curl_upload(url, token, path):
     value from stdin before sending the file. No redirects or upload retries.
     """
     require('\n' not in token and '\r' not in token, 'invalid_credential_format')
-    deadline = 1800 if path.stat().st_size > 1024 * 1024 else 60
+    deadline = 2400 if path.stat().st_size > 1024 * 1024 else 60
     command = ['curl', '--show-error', '--proto', '=https',
                '--connect-timeout', '20', '--max-time', str(deadline), '--retry', '0',
+               '--speed-limit', '1024', '--speed-time', '120',
                '--form', 'access_token=<-', '--output', os.devnull,
                '--write-out', '%{http_code} %{size_upload} %{speed_upload}',
                '--form', f'file=@{path};filename={path.name};type=application/octet-stream', url]
@@ -158,6 +163,8 @@ def curl_upload(url, token, path):
     for sample in samples[-3:]:
         print('Upload progress: ' + sample, flush=True)
     print(f'Upload result: {path.name}, HTTP {status}, bytes {sent}, speed {speed:.0f} B/s', flush=True)
+    if result.returncode == 28 and sent < path.stat().st_size:
+        raise IncompleteUpload('gitee_upload_curl_28_incomplete_body')
     require(result.returncode == 0, f'gitee_upload_curl_{result.returncode}_outcome_uncertain')
     require(200 <= status < 300, f'gitee_http_{status}')
 
@@ -300,16 +307,28 @@ class Gitee:
         # this method so no upload can outlive its temporary directory or failure.
         results = [ensure_asset(path) for path in sorted(paths, key=lambda item: item.stat().st_size)
                    if not path.name.endswith('.zip')]
-        with ThreadPoolExecutor(max_workers=3) as workers:
-            futures = [workers.submit(ensure_asset, path) for path in paths if path.name.endswith('.zip')]
-            errors = []
-            for future in futures:
-                try:
-                    results.append(future.result())
-                except Exception as error:
-                    errors.append(error)
-            if errors:
-                raise errors[0]
+        def transfer_archives(archives):
+            completed, failed = [], []
+            with ThreadPoolExecutor(max_workers=3) as workers:
+                futures = [(path, workers.submit(ensure_asset, path)) for path in archives]
+                for path, future in futures:
+                    try:
+                        completed.append(future.result())
+                    except Exception as error:
+                        failed.append((path, error))
+            return completed, failed
+
+        completed, failed = transfer_archives([path for path in paths if path.name.endswith('.zip')])
+        results.extend(completed)
+        if failed and all(isinstance(error, IncompleteUpload) for _, error in failed):
+            # A confirmed incomplete body cannot have produced the full file.
+            # Re-read Gitee in ensure_asset(), then make at most one fresh attempt.
+            for path, _ in failed:
+                print(f'Retrying incomplete upload (2/2): {path.name}', flush=True)
+            completed, failed = transfer_archives([path for path, _ in failed])
+            results.extend(completed)
+        if failed:
+            raise failed[0][1]
         uploaded = sum(result[0] for result in results)
         skipped = sum(result[1] for result in results)
         # Only promote the release and its actual notes after all 9 files are verified.

@@ -34,7 +34,7 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 95
     steps:
       - name: Check publishing credential
         id: config

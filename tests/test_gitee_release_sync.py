@@ -233,7 +233,7 @@ def test_dry_run_needs_no_gitee_token_and_performs_no_write(bundle, monkeypatch,
     assert '未写入 Gitee' in capsys.readouterr().out
 
 
-@pytest.mark.parametrize('size,deadline', [(7, 60), (1024 * 1024 + 1, 1800)])
+@pytest.mark.parametrize('size,deadline', [(7, 60), (1024 * 1024 + 1, 2400)])
 @pytest.mark.parametrize('status,exit_code,expected', [('201',0,None), ('000',28,'gitee_upload_curl_28'), ('413',0,'gitee_http_413')])
 def test_curl_upload_keeps_token_off_argv_and_enforces_total_timeout(tmp_path, monkeypatch, capsys, status, exit_code, expected, size, deadline):
     from types import SimpleNamespace
@@ -247,6 +247,7 @@ def test_curl_upload_keeps_token_off_argv_and_enforces_total_timeout(tmp_path, m
         assert kwargs['input'] == TOKEN
         assert command[command.index('--max-time') + 1] == str(deadline)
         assert '--location' not in command
+        assert command[command.index('--speed-time') + 1] == '120'
         assert kwargs['timeout'] == deadline + 30
         return SimpleNamespace(stdout=f'{status} 1234 512', stderr=TOKEN + '\n 20 20.8M 0 0 20 4096k 0 14000 0:25:00 0:05:00 0:20:00 0\r', returncode=exit_code)
     monkeypatch.setattr(sync.subprocess, 'run', run)
@@ -287,3 +288,40 @@ def test_archives_run_concurrently_and_failure_waits_for_other_uploads(bundle):
     assert '附件镜像尚未完成' in server.release['body']
     assert server.api().mirror(meta, COMMIT, directory) == (1, 8)
     assert server.release['body'] == meta['body']
+
+
+def test_only_confirmed_incomplete_archive_is_retried_once(bundle):
+    meta, directory = bundle
+    server = Server(directory)
+    api = server.api()
+    normal = api.uploader
+    attempts = {}
+    def upload(url, token, path):
+        attempts[path.name] = attempts.get(path.name, 0) + 1
+        if path.name.endswith('-macos-aarch64.zip') and attempts[path.name] == 1:
+            raise sync.IncompleteUpload('synthetic_incomplete_body')
+        normal(url, token, path)
+    api.uploader = upload
+    assert api.mirror(meta, COMMIT, directory) == (9, 0)
+    assert attempts['XZBot-0.9.0rc6-macos-aarch64.zip'] == 2
+    assert all(count == 1 for name, count in attempts.items() if not name.endswith('-macos-aarch64.zip'))
+    assert len(server.posts) == len(set(server.posts)) == 9
+
+
+def test_incomplete_upload_retry_is_bounded(bundle):
+    meta, directory = bundle
+    server = Server(directory)
+    api = server.api()
+    normal = api.uploader
+    attempts = []
+    def upload(url, token, path):
+        if path.name.endswith('-macos-aarch64.zip'):
+            attempts.append(path.name)
+            raise sync.IncompleteUpload('synthetic_incomplete_body')
+        normal(url, token, path)
+    api.uploader = upload
+    with pytest.raises(sync.IncompleteUpload):
+        api.mirror(meta, COMMIT, directory)
+    assert len(attempts) == 2
+    assert len(server.files) == 8
+    assert '附件镜像尚未完成' in server.release['body']
