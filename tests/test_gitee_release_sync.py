@@ -246,7 +246,7 @@ def test_curl_upload_keeps_token_off_argv_and_enforces_total_timeout(tmp_path, m
         assert command[command.index('--max-time') + 1] == str(deadline)
         assert '--location' not in command
         assert kwargs['timeout'] == deadline + 30
-        return SimpleNamespace(stdout=f'{status} 1234 512', stderr=TOKEN, returncode=exit_code)
+        return SimpleNamespace(stdout=f'{status} 1234 512', stderr=TOKEN + '\n 20 20.8M 0 0 20 4096k 0 14000 0:25:00 0:05:00 0:20:00 0\r', returncode=exit_code)
     monkeypatch.setattr(sync.subprocess, 'run', run)
     if expected:
         with pytest.raises(sync.SyncError, match=expected):
@@ -255,6 +255,7 @@ def test_curl_upload_keeps_token_off_argv_and_enforces_total_timeout(tmp_path, m
         sync.curl_upload('https://gitee.com/api/v5/upload', TOKEN, path)
     output = capsys.readouterr()
     assert TOKEN not in output.out + output.err
+    assert 'current_speed=0 B/s' in output.out
 
 
 def test_curl_upload_rejects_malformed_credential(tmp_path):

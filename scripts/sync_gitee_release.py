@@ -118,7 +118,7 @@ def curl_upload(url, token, path):
     """
     require('\n' not in token and '\r' not in token, 'invalid_credential_format')
     deadline = 300 if path.stat().st_size > 1024 * 1024 else 60
-    command = ['curl', '--silent', '--show-error', '--proto', '=https',
+    command = ['curl', '--show-error', '--proto', '=https',
                '--connect-timeout', '20', '--max-time', str(deadline), '--retry', '0',
                '--form', 'access_token=<-', '--output', os.devnull,
                '--write-out', '%{http_code} %{size_upload} %{speed_upload}',
@@ -133,6 +133,15 @@ def curl_upload(url, token, path):
         status, sent, speed = int(code), int(sent), float(speed)
     except (ValueError, TypeError):
         raise SyncError('gitee_upload_invalid_receipt') from None
+    # Only numeric progress columns are allowed out of stderr. Never print raw
+    # server responses, curl diagnostics or a credential reflected in an error.
+    samples = []
+    for line in result.stderr.replace('\r', '\n').splitlines():
+        columns = line.split()
+        if len(columns) == 12 and all(re.fullmatch(r'[0-9.kKMGT:%-]+', value) for value in columns):
+            samples.append(f'elapsed={columns[9]}, sent={columns[5]}, current_speed={columns[11]} B/s')
+    for sample in samples[-3:]:
+        print('Upload progress: ' + sample, flush=True)
     print(f'Upload result: {path.name}, HTTP {status}, bytes {sent}, speed {speed:.0f} B/s', flush=True)
     require(result.returncode == 0, f'gitee_upload_curl_{result.returncode}_outcome_uncertain')
     require(200 <= status < 300, f'gitee_http_{status}')
