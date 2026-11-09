@@ -46,3 +46,6 @@ build/
 !/docs/public-migration.md
 !/docs/releases.md
 !/docs/release-notes.md
+
+!/docs/source-build.md
+!/docs/user-guide.md

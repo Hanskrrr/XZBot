@@ -407,3 +407,50 @@ async def test_provider_failure_is_silent_and_command_or_sdk_error_does_not_open
     clock.advance(6)
     assert (await engine.handle(event(event_id="backoff")))["mode"] == "none"
     assert len(calls(provider, "followup")) == count
+
+@pytest.mark.asyncio
+async def test_followup_keeps_intervening_members_and_can_decline(rig):
+    engine,settings,provider,clock=rig
+    await start(engine)
+    clock.advance(6)
+    engine.groups.add(SCOPE,'20002','今晚谁来双排？','other-question',display_name='群友乙')
+    provider.followup_reply={'continuation':False,'participate':False,'confidence':.1,'text':''}
+    result=await engine.handle(event('我来，等我五分钟',event_id='answer-other'))
+    assert result['mode']=='none' and result['reason']=='followup_not_for_bot'
+    messages=calls(provider,'followup')[-1]['messages']
+    recent=next(json.loads(m['content'].split('\n',1)[1])['recent_conversation'] for m in messages
+                if '"recent_conversation"' in m['content'])
+    assert any(r['message_id']=='other-question' for r in recent)
+    assert '不代表这一句仍在对你说' in messages[0]['content']
+    assert IDENTITY not in engine._group_threads
+
+@pytest.mark.asyncio
+async def test_native_quote_is_in_final_message_even_outside_recent_window(rig):
+    engine,settings,provider,clock=rig
+    quote={'message_id':'1234','user_id':'10001','kind':'group','scope_id':'30001',
+           'text':'那个位置可以先放一盏小灯。','sent_at':int(clock.now)-3600,'media_types':[]}
+    result=await engine.handle(event('你说放哪里？',event_id='quote-now',reply_to_id='1234',quoted_message=quote))
+    assert result['mode']=='text'
+    current=json.loads(calls(provider,'direct')[-1]['messages'][-1]['content'].split('\n',1)[1])['current_message']
+    assert current['quoted_message']['text']==quote['text']
+    assert current['quote_status']=='resolved'
+    assert current['has_images'] is False
+
+
+def test_quote_cannot_cross_conversations_or_reply_ids(rig):
+    from pydantic import ValidationError
+    quote={'message_id':'1234','user_id':'10001','kind':'group','scope_id':'30002',
+           'text':'别的群','sent_at':1}
+    with pytest.raises(ValidationError):event(reply_to_id='1234',quoted_message=quote)
+    quote['scope_id']='30001'
+    with pytest.raises(ValidationError):event(reply_to_id='5678',quoted_message=quote)
+
+
+def test_unavailable_quote_is_not_invented_and_optout_quote_is_filtered(rig):
+    engine,_,_,clock=rig
+    missing=engine._current_message(event(reply_to_id='1234'))
+    assert missing['quote_status']=='unavailable' and 'quoted_message' not in missing
+    quote={'message_id':'1234','user_id':'20002','kind':'group','scope_id':'30001','text':'已撤回旁听','sent_at':1}
+    engine.groups.set_optout(SCOPE,'20002',True)
+    current=engine._current_message(event(reply_to_id='1234',quoted_message=quote))
+    assert 'quoted_message' not in current

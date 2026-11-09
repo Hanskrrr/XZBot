@@ -1,9 +1,11 @@
-"""CI-only: install and smoke test the exact ZIP that will be published."""
+"""Install and smoke test the exact ZIP in CI or an explicit local sandbox."""
+import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
 import platform
+import socket
 import subprocess
 import sys
 import tempfile
@@ -11,7 +13,13 @@ import zipfile
 
 
 def main():
-    if os.environ.get('CI')!='true':raise RuntimeError('Disposable CI verification only.')
+    parser=argparse.ArgumentParser()
+    parser.add_argument('--local',action='store_true',help='Verify in a temporary directory; requires unused ports 6196/6197/6199.')
+    args=parser.parse_args()
+    if os.environ.get('CI')!='true' and not args.local:raise RuntimeError('Use --local for an explicit disposable installation test.')
+    for port in (6196,6197,6199):
+        with socket.socket() as connection:
+            if connection.connect_ex(('127.0.0.1',port))==0:raise RuntimeError('Verification requires unused ports 6196/6197/6199; no services were stopped.')
     archives=list(Path('dist/release').glob('*.zip'))
     if len(archives)!=1:raise RuntimeError('Expected exactly one native ZIP.')
     archive=archives[0].resolve()
@@ -33,7 +41,7 @@ def main():
         assert not (root/'data').exists() and not (root/'accounts').exists()
         entry={'Windows':'Start-XZBot.cmd','Darwin':'Start-XZBot.command','Linux':'Start-XZBot.sh'}[platform.system()]
         command=['cmd.exe','/d','/c',entry,'--no-open'] if os.name=='nt' else ['sh',entry,'--no-open']
-        env={**os.environ,'PYTHONUTF8':'1','PYTHONPATH':str(root/'src'),'AZUSA_ROOT':str(root)}
+        env={**os.environ,'CI':'true','PYTHONUTF8':'1','PYTHONPATH':str(root/'src'),'AZUSA_ROOT':str(root)}
         subprocess.run(command,cwd=root,env=env,check=True,timeout=600)
         profiles=json.loads((root/'data/profiles.json').read_text(encoding='utf-8'))
         assert [p['name'] for p in profiles['profiles']]==['阿梓','灰泽满']

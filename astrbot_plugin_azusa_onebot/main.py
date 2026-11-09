@@ -522,6 +522,41 @@ class AzusaOneBot(Star):
                 "reply_to_id": reply_to_id,
                 "unprompted": kind == "group" and not mentioned and command not in COMMANDS}
 
+    async def _quoted_message(self, event, payload):
+        """Fetch only the explicitly quoted native message, never general history."""
+        ref = payload.get('reply_to_id')
+        if not ref:
+            return None
+        try:
+            row = await asyncio.wait_for(event.bot.get_msg(message_id=int(ref)), timeout=3)
+            if not isinstance(row,dict) or message_id(row.get('message_id')) != ref:
+                return None
+            sender = row.get('sender')
+            if not isinstance(sender,dict):return None
+            author = numeric_id(sender.get('user_id'))
+            if not author:return None
+            if payload['kind']=='group':
+                if numeric_id(row.get('group_id')) != payload['scope_id']:return None
+            else:
+                if row.get('message_type')!='private' or row.get('group_id'):return None
+                if author!=payload['user_id'] and not (author==payload['app_id'] and
+                        numeric_id(row.get('target_id'))==payload['user_id']):return None
+            segments=row.get('message')
+            if (not isinstance(segments,list) or len(segments)>200 or
+                    any(not isinstance(s,dict) or not isinstance(s.get('data'),dict) for s in segments)):
+                return None
+            text=''.join(s['data'].get('text','') for s in segments
+                         if s.get('type')=='text' and isinstance(s['data'].get('text'),str))
+            if len(text)>6000:return None
+            timestamp=row.get('time')
+            if type(timestamp) is not int or timestamp<0:return None
+            return {'message_id':ref,'user_id':author,'kind':payload['kind'],'scope_id':payload['scope_id'],
+                    'text':text,'sent_at':timestamp,
+                    'media_types':sorted({s['type'] for s in segments if s.get('type') in {'image','record','video','file'}})}
+        except Exception:
+            # A missing/recalled/unsupported quote must not drop the new message.
+            return None
+
     def _message(self, reply):
         mode = reply.get("mode")
         if mode == "none":
@@ -611,6 +646,9 @@ class AzusaOneBot(Star):
             payload = self._payload(event, policy)
             if payload is None:
                 return
+            quoted = await self._quoted_message(event,payload)
+            if quoted is not None:
+                payload['quoted_message'] = quoted
             base = self._endpoint()
             headers = {"Authorization": "Bearer " + self._token()}
             response = await self.client.post(base + "/bridge/message", json=payload, headers=headers)

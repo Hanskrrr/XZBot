@@ -73,16 +73,16 @@ CI 不登录 QQ，也不使用任何真实模型密钥。Mac 现有 QQ 环境可
 可选 Gemini Balance 仍需目标平台安装其 Git 和依赖；发布测试不等于已经验证它在每个系统上运行。
 
 
-## RC4：本机更新功能与独立下载源
+## RC4：GitHub 更新与自定义下载源
 
-管理页「更新与备份 → 版本更新」配置可信 HTTPS `updates.json`。默认地址为空，不请求个人 GitHub；可每 6 小时检查，并可选择自动下载。安装由管理员点“安装并重启 XZBot”触发，不在聊天中静默重启。首次从 RC3 升级到带此功能的版本仍需手动更新一次；RC3 本身没有更新器和程序文件清单。
+管理页「更新与备份 → 版本更新」默认使用 `https://api.github.com/repos/Hanskrrr/XZBot/releases`，无需 GitHub 密钥；可每 6 小时检查，并可选择自动下载。也支持自定义可信 HTTPS `updates.json`。安装由管理员点“安装并重启 XZBot”触发，不在聊天中静默重启。首次从 RC3 升级到带此功能的版本仍需手动更新一次；RC3 本身没有更新器和程序文件清单。
 
 发行包包含 `RELEASE-FILES.json`。更新前校验整包 SHA256、平台、架构、版本、提交号、内部文件清单及本地代码是否被修改。只允许替换公开程序文件，拒绝写 data/content/accounts/config/local.json 等私有路径、符号链接、Windows 特殊路径及 Git 开发目录。安装期间持有各账号启动锁，验证 PID 命令行与工作目录后只停止 XZBot 核心和 AstrBot 桥接，不停止 QQ/NapCat/SnowLuma/虚拟机。保留原先运行的实例列表；只恢复那些实例。
 
 `data/updates/rollback-*` 保存旧程序和 SQLite 一致性备份。失败时尝试恢复旧程序及依赖再重启；数据库备份供必要时人工恢复，不自动回灌数据库而覆盖更新期间新增的聊天。跨版本数据库模式是否支持向后兼容仍须在发布前验收。错误状态留在更新页；进程被断电或终止不能保证自动回滚，备份目录应保留。
 
-清单可以与 ZIP 一同放在独立的 HTTPS 静态下载站点。运行 `python scripts/build_update_feed.py <已验证发行资产目录>` 生成不绑定个人 GitHub 的 `updates.json`，使用相对 ZIP 地址，更新器要求清单和 ZIP 同源且没有跨站重定向。三个 ZIP 必须各自有成功的 verification.json。SHA256 校验保证下载完整性；目前发布者身份依赖管理员信任的 HTTPS 更新源，未另做离线签名。
+清单可以与 ZIP 一同放在独立的 HTTPS 静态下载站点。运行 `python scripts/build_update_feed.py <已验证发行资产目录>` 生成不绑定个人 GitHub 的 `updates.json`，使用相对 ZIP 地址，自定义静态站点要求清单和 ZIP 同源且没有跨站重定向；GitHub 专用源仅额外接受其官方发行资产 CDN 的签名重定向。三个 ZIP 必须各自有成功的 verification.json。SHA256 校验保证下载完整性；目前发布者身份依赖管理员信任的 HTTPS 更新源，未另做离线签名。
 
-本机代码与测试完成不等于 Windows/Linux 更新已实机验收。后续公开发布前仍要运行新增的三端更新回归与目标系统安装验收。这轮根据用户要求不发布 RC4，也不设置公共更新地址。
+三端 CI 验证的是原生安装、核心/桥接启动及更新器回归，不含真实 QQ 扫码或发送。完整 QQ 登录与第三方平台收发仍需目标机器验收。源码构建、Gitee 镜像与附件发布步骤见 [源码构建手册](source-build.md)，日常使用见 [简明操作手册](user-guide.md)。
 
 若需要避免与个人 GitHub 账号关联，仅更换下载 URL 不够：发行包中 README、作者署名、源代码引用和旧仓库链接也须在正式分发前审查。既有公开仓库与 RC3 Release 并未因此隐藏或删除。

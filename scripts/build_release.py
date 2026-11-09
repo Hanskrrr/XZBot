@@ -14,6 +14,8 @@ ROOT=Path(__file__).resolve().parents[1]
 
 
 def build(target,uv,out):
+    host={'Windows':'windows','Darwin':'macos','Linux':'linux'}.get(platform.system())
+    if target!=host:raise RuntimeError('Build on the target operating system; this script is not a cross compiler.')
     if not uv.is_file():raise RuntimeError('Native uv executable was not found.')
     subprocess.run(['git','-C',str(ROOT),'diff','--exit-code','HEAD','--'],check=True,stdout=subprocess.DEVNULL)
     subprocess.run([sys.executable,'scripts/check_repository.py','--ref','HEAD'],cwd=ROOT,check=True)

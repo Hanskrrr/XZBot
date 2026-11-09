@@ -144,3 +144,58 @@ def test_worker_applies_or_rolls_back_without_touching_qq_or_private_data(tmp_pa
         assert json.loads((root/'RELEASE-INFO.json').read_text())['version']=='0.9.1'
     assert service.status()['operation']['state']==('failed' if fails else 'installed')
     assert (root/'content/persona.md').read_text()=='PRIVATE SENTINEL'
+
+@pytest.mark.asyncio
+async def test_github_release_feed_selects_prerelease_and_checks_assets(tmp_path):
+    from azusa_bot.updates.github import DEFAULT_SOURCE
+    service=UpdateService(tmp_path)
+    archive,release,_=package(tmp_path)
+    release['url']='XZBot-0.9.1.zip'
+    rows=[{'tag_name':'v0.9.1','draft':False,'prerelease':False,'assets':[{'name':'updates.json'},{'name':release['url']}]}]
+    requests=[]
+    async def fetch(url,limit):
+        requests.append(url)
+        return json.dumps(rows if url==DEFAULT_SOURCE else {'schema':1,'releases':[release]}).encode()
+    service.fetch=fetch
+    status=await service.check()
+    assert status['check']['release']['url']=='https://github.com/Hanskrrr/XZBot/releases/download/v0.9.1/XZBot-0.9.1.zip'
+    assert len(requests)==2
+    release['url']='https://attacker.example/package.zip'
+    with pytest.raises(ValueError,match='origin_mismatch'):await service.check()
+
+@pytest.mark.asyncio
+async def test_github_prerelease_optout_and_old_release_without_feed(tmp_path):
+    from azusa_bot.updates.github import DEFAULT_SOURCE
+    service=UpdateService(tmp_path)
+    service.save(DEFAULTS|{'include_prerelease':False})
+    async def fetch(url,limit):
+        assert url==DEFAULT_SOURCE
+        return json.dumps([{'tag_name':'v9.0.0-rc.1','prerelease':True,'assets':[{'name':'updates.json'}]},
+                           {'tag_name':'v0.9.0-rc.3','prerelease':True,'assets':[]}]).encode()
+    service.fetch=fetch
+    assert (await service.check())['check']['release'] is None
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('target,allowed',[
+    ('https://release-assets.githubusercontent.com/signed?token=public-download',True),
+    ('http://release-assets.githubusercontent.com/file',False),
+    ('https://github.com.attacker.example/file',False),
+    ('https://127.0.0.1/secret',False),
+    ('https://release-assets.githubusercontent.com@attacker.example/file',False),
+])
+async def test_github_download_redirect_boundary(monkeypatch,target,allowed):
+    import httpx
+    import azusa_bot.updates.service as mod
+    real_client=httpx.AsyncClient
+    requested=[]
+    def handler(request):
+        requested.append(str(request.url))
+        assert 'authorization' not in request.headers
+        return httpx.Response(302,headers={'location':target}) if len(requested)==1 else httpx.Response(200,content=b'zip')
+    monkeypatch.setattr(mod.httpx,'AsyncClient',lambda **kw:real_client(transport=httpx.MockTransport(handler),**kw))
+    monkeypatch.setattr(mod.socket,'getaddrinfo',lambda *a,**k:[(2,1,6,'',('1.1.1.1',443))])
+    if allowed:assert await mod.download('https://github.com/example/XZBot/releases/download/v1/file.zip',100)==b'zip'
+    else:
+        with pytest.raises(ValueError,match='origin_mismatch'):
+            await mod.download('https://github.com/example/XZBot/releases/download/v1/file.zip',100)
+        assert len(requested)==1

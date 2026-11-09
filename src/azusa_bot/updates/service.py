@@ -18,8 +18,9 @@ from ..settings import private_write
 from ..runtime_layout import runtime_layout
 from ..host import protect
 from .archive import validate
+from . import github
 
-DEFAULTS={'feed_url':'','auto_check':True,'auto_download':False,'include_prerelease':True}
+DEFAULTS={'feed_url':github.DEFAULT_SOURCE,'auto_check':True,'auto_download':False,'include_prerelease':True}
 
 
 def version(value):
@@ -45,19 +46,27 @@ def https_url(value):
 
 async def download(url, limit):
     https_url(url)
-    addresses=await asyncio.get_running_loop().run_in_executor(None,lambda:socket.getaddrinfo(urlsplit(url).hostname,443,type=socket.SOCK_STREAM))
-    if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
-        raise ValueError('update_public_host_required')
-    # A redirect to another origin is never implicitly trusted as a code publisher.
+    github_asset=github.asset_url(url)
+    # GitHub signs release-asset CDN URLs. Only this explicit provider can
+    # redirect, only to its exact public asset hosts, never with credentials.
     async with httpx.AsyncClient(timeout=60,follow_redirects=False,trust_env=False) as client:
-        async with client.stream('GET',url,headers={'User-Agent':'XZBot-updater/1'}) as response:
-            if response.status_code!=200:raise ValueError('update_download_failed')
-            chunks=[];size=0
-            async for chunk in response.aiter_bytes():
-                size+=len(chunk)
-                if size>limit:raise ValueError('update_download_too_large')
-                chunks.append(chunk)
-    return b''.join(chunks)
+        for attempt in range(3):
+            addresses=await asyncio.get_running_loop().run_in_executor(None,lambda:socket.getaddrinfo(urlsplit(url).hostname,443,type=socket.SOCK_STREAM))
+            if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
+                raise ValueError('update_public_host_required')
+            async with client.stream('GET',url,headers={'User-Agent':'XZBot-updater/1'}) as response:
+                if response.status_code in {301,302,303,307,308}:
+                    target=urljoin(url,response.headers.get('location',''))
+                    if not github_asset or not github.redirect_allowed(target):raise ValueError('update_asset_origin_mismatch')
+                    url=target;continue
+                if response.status_code!=200:raise ValueError('update_download_failed')
+                chunks=[];size=0
+                async for chunk in response.aiter_bytes():
+                    size+=len(chunk)
+                    if size>limit:raise ValueError('update_download_too_large')
+                    chunks.append(chunk)
+                return b''.join(chunks)
+    raise ValueError('update_download_failed')
 
 
 class UpdateService:
@@ -103,7 +112,11 @@ class UpdateService:
     async def check(self):
         cfg=DEFAULTS|self.read('settings.json',{})
         if not cfg['feed_url']:raise ValueError('update_source_not_configured')
-        feed=json.loads(await self.fetch(cfg['feed_url'],1024*1024))
+        base=cfg['feed_url']
+        if github.repository(base):
+            feed,base=await github.resolve(base,self.fetch,include_prerelease=cfg['include_prerelease'],version=version)
+        else:
+            feed=json.loads(await self.fetch(base,1024*1024))
         if not isinstance(feed,dict) or feed.get('schema')!=1 or not isinstance(feed.get('releases'),list) or len(feed['releases'])>100:
             raise ValueError('update_feed_invalid')
         system={'Windows':'windows','Darwin':'macos','Linux':'linux'}.get(platform.system())
@@ -114,8 +127,8 @@ class UpdateService:
             if not all(isinstance(v,str) for v in r.values()):raise ValueError('update_feed_invalid')
             order=version(r['version'])
             if not re.fullmatch('[a-f0-9]{64}',r['sha256']) or not re.fullmatch('[a-f0-9]{40}',r['commit']):raise ValueError('update_feed_invalid')
-            url=https_url(urljoin(cfg['feed_url'],r['url']))
-            if urlsplit(url).netloc!=urlsplit(cfg['feed_url']).netloc:raise ValueError('update_asset_origin_mismatch')
+            url=https_url(urljoin(base,r['url']))
+            if urlsplit(url).netloc!=urlsplit(base).netloc:raise ValueError('update_asset_origin_mismatch')
             if (r['platform'],r['arch'])!=(system,arch) or order<=version(__version__):continue
             if 'rc' in r['version'] and not cfg['include_prerelease']:continue
             candidates.append(r|{'url':url})

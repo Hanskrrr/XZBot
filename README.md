@@ -16,6 +16,10 @@
 
 部分能力依赖所选云模型、外部平台接口、账号权限及有效登录状态；具体行为以管理界面与发送回执为准。
 
+## 下载与手册
+
+[三端 Release 下载](https://github.com/Hanskrrr/XZBot/releases) · [简明操作手册](docs/user-guide.md) · [三端部署](docs/releases.md) · [源码安装与手动构建](docs/source-build.md)
+
 ## 快速开始
 
 需要 Python 3.12、[uv](https://docs.astral.sh/uv/) 和 Git。首先仅启动本机管理核心：

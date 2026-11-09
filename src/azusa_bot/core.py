@@ -61,6 +61,18 @@ def output_policy(settings, root=None):
     return prompt(root,"output",settings)
 
 
+class QuotedMessage(BaseModel):
+    """One explicit native reply, scoped and fetched by the authenticated bridge."""
+    model_config = ConfigDict(extra="forbid")
+    message_id: str = Field(max_length=21, pattern=r"^-?[0-9]{1,20}$")
+    user_id: str = Field(pattern=QQ_ID_PATTERN)
+    kind: Literal["group", "dm"]
+    scope_id: str = Field(pattern=QQ_ID_PATTERN)
+    text: str = Field(max_length=6000)
+    sent_at: int = Field(ge=0)
+    media_types: list[Literal["image", "record", "video", "file"]] = Field(default_factory=list, max_length=4)
+
+
 class Incoming(BaseModel):
     model_config = ConfigDict(extra="forbid")
     transport: Literal["official", "onebot"] = "official"
@@ -75,6 +87,7 @@ class Incoming(BaseModel):
     unprompted: bool = False
     display_name: str = Field(default="", max_length=80)
     reply_to_id: str | None = Field(default=None, max_length=21, pattern=r"^-?[0-9]{1,20}$")
+    quoted_message: QuotedMessage | None = None
     images: list[Annotated[str,Field(max_length=8192)]] = Field(default_factory=list, max_length=3)
     activity_only: bool = False
 
@@ -84,6 +97,10 @@ class Incoming(BaseModel):
             re.fullmatch(QQ_ID_PATTERN, value) for value in (self.app_id, self.scope_id, self.user_id)
         ):
             raise ValueError("OneBot requires numeric self, group, and user IDs")
+        if self.quoted_message and (self.transport != "onebot" or
+                self.quoted_message.message_id != self.reply_to_id or
+                (self.quoted_message.kind, self.quoted_message.scope_id) != (self.kind, self.scope_id)):
+            raise ValueError("Quoted message must belong to the native reply and the same conversation")
         return self
 
 
@@ -936,10 +953,19 @@ class Engine:
         now=time.monotonic()
         return [dict(m,age_seconds=max(0,int(now-m["at"]))) for m in thread["messages"]]
 
-    @staticmethod
-    def _current_message(event):
-        return dict(kind=event.kind,message_id=event.event_id,user_id=event.user_id,text=event.text,
+    def _current_message(self,event):
+        result = dict(kind=event.kind,message_id=event.event_id,user_id=event.user_id,text=event.text,
                     has_images=bool(event.images),image_count=len(event.images),reply_to_id=event.reply_to_id)
+        if event.reply_to_id:
+            result['quote_status'] = 'unavailable'
+            quoted = event.quoted_message
+            scope = f'{event.transport}:{event.app_id}:{event.kind}:{event.scope_id}'
+            if (quoted and not GroupConversation.contains_credentials(quoted.text)
+                    and not self.groups.opted_out(scope,quoted.user_id)
+                    and self.memory.collection_source(scope,quoted.user_id) != 'member_disabled'):
+                result['quoted_message'] = quoted.model_dump() | {'role':'assistant' if quoted.user_id==event.app_id else 'user'}
+                result['quote_status'] = 'resolved'
+        return result
 
     def _acknowledge_thread(self,pending,message_id):
         kind=pending.get("thread_kind")
@@ -1074,7 +1100,8 @@ class Engine:
             self._last[identity]=time.monotonic()
             return self._finish_group(event,scope,reply_id,{"mode":"text","text":answer},demo=demo)
         previous = self._group_snapshot(scope,settings)
-        quoted_bot = bool(event.reply_to_id and any(r["role"]=="assistant" and r["message_id"]==event.reply_to_id for r in previous))
+        quoted_bot = bool(event.reply_to_id and (any(r["role"]=="assistant" and r["message_id"]==event.reply_to_id for r in previous)
+                         or (event.quoted_message and event.quoted_message.user_id==event.app_id)))
         direct = not event.unprompted or event.mentioned or command in GROUP_COMMANDS or quoted_bot
         addressed_elsewhere=not direct and (event.other_mentioned or (event.reply_to_id and not quoted_bot))
         named = (not direct and not addressed_elsewhere
@@ -1322,7 +1349,7 @@ class Engine:
 
     def _group_prompt(self,event,scope,settings,context,*,trace=None,memories=None,addressed=False,heat=None,dialogue=None):
         policy=prompt(self.content_root,"group",settings)
-        policy += "\n" + "\n".join(prompt(self.content_root,key,settings) for key in ("knowledge","expression","vision","output","style","dialogue"))
+        policy += "\n" + "\n".join(prompt(self.content_root,key,settings) for key in ("knowledge","expression","vision","output","style","dialogue","conversation_target"))
         memories = self.memory.retrieve(scope,event.user_id,event.text) if memories is None else memories
         knowledge = lore.for_prompt(self.content_root,event.text)
         persona = (self.content_root/"content/persona.md").read_text()
@@ -1386,7 +1413,7 @@ class Engine:
         group_thread=self._dialogue_context(event,scope,settings) if group_thread is None else group_thread
         persona = (self.content_root / "content/persona.md").read_text()
         policy = prompt(self.content_root,"direct",settings)
-        policy += "\n" + "\n".join(prompt(self.content_root,key,settings) for key in ("knowledge","expression","vision","output","style","dialogue"))
+        policy += "\n" + "\n".join(prompt(self.content_root,key,settings) for key in ("knowledge","expression","vision","output","style","dialogue","conversation_target"))
         expressions = [] if mode_override else assets.catalog(self.content_root,text)
         context = {"current_message":self._current_message(event),
                    "available_expressions":expressions,"trusted_identity": {"kind":event.kind, "user_id":event.user_id, "is_owner":owner},

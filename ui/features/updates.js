@@ -1,6 +1,6 @@
 /* Update UI uses the existing same-origin authenticated admin client. */
 let updateState=null;
-const updateErrors={update_source_not_configured:'请先填写可信更新源。',update_release_installation_required:'当前是源码开发目录，自动覆盖已禁用；发行包安装才能使用。',update_none_available:'没有适用于本机的新版本。',update_checksum_mismatch:'下载包校验失败，未安装。',update_asset_origin_mismatch:'安装包与更新清单不在同一个可信站点，已拒绝。',update_not_prepared:'请先下载更新。',update_busy:'已有更新任务正在处理。',update_local_code_modified:'程序文件存在本地修改，已保留；请手动合并升级。',update_operation_failed:'更新操作未完成，请检查更新源与本机状态。',update_settings_invalid:'请检查 HTTPS 更新地址与开关设置。'};
+const updateErrors={update_source_not_configured:'请填写 GitHub Releases API 地址或可信 HTTPS 更新清单。',update_release_installation_required:'当前是源码开发目录，自动覆盖已禁用；发行包安装才能使用。',update_none_available:'没有适用于本机的新版本。',update_checksum_mismatch:'下载包校验失败，未安装。',update_asset_origin_mismatch:'安装包与更新清单不在同一个可信站点，已拒绝。',update_not_prepared:'请先下载更新。',update_busy:'已有更新任务正在处理。',update_local_code_modified:'程序文件存在本地修改，已保留；请手动合并升级。',update_operation_failed:'更新操作未完成，请检查更新源与本机状态。',update_settings_invalid:'请检查 HTTPS 更新地址与开关设置。'};
 function renderUpdates(data){
  updateState=data;const cfg=data.settings||{};
  $('updates-feed').value=cfg.feed_url||'';$('updates-auto-check').checked=cfg.auto_check===true;

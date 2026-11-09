@@ -743,3 +743,33 @@ def test_segments_keep_explicit_at_markup_as_plain_text(monkeypatch):
     bridge=make_bridge(monkeypatch,handler);event=Event(raw());run(bridge,event)
     assert len(event.bot.calls)==2
     assert event.bot.calls[0][1]['message']==[{'type':'text','data':{'text':parts[0]}}]
+
+@pytest.mark.asyncio
+async def test_native_quote_fetch_is_scoped_and_missing_quote_does_not_drop_message(monkeypatch):
+    seen=[]
+    monkeypatch.delenv('AZUSA_ONEBOT_POLICY_FILE',raising=False)
+    monkeypatch.setenv('AZUSA_BRIDGE_TOKEN','x'*40)
+    bridge=module.AzusaOneBot(SimpleNamespace(),{'enabled':True,'self_id':str(SELF),
+        'adapter_id':'azusa-onebot','allowed_groups':[str(GROUP)],'allowed_dm_users':[str(USER)]})
+    await bridge.client.aclose()
+    bridge.client=httpx.AsyncClient(transport=httpx.MockTransport(transport(seen)),trust_env=False)
+    class QuoteBot(Bot):
+        async def get_msg(self,**kwargs):
+            assert kwargs=={'message_id':1234}
+            return {'message_id':1234,'group_id':GROUP,'sender':{'user_id':SELF},'time':123,
+                    'message':[{'type':'text','data':{'text':'上一条确实说过的话'}},
+                               {'type':'image','data':{'url':'https://not-fetched.invalid/old.png'}}]}
+    e=Event(raw(message=[{'type':'reply','data':{'id':'1234'}},
+                         {'type':'at','data':{'qq':str(SELF)}},
+                         {'type':'text','data':{'text':'那再说一次'}}]),bot=QuoteBot())
+    payload=bridge._payload(e,bridge._policy())
+    quote=await bridge._quoted_message(e,payload)
+    assert quote['text']=='上一条确实说过的话' and quote['media_types']==['image']
+    assert 'url' not in str(quote)
+    payload['scope_id']=str(GROUP+1)
+    assert await bridge._quoted_message(e,payload) is None
+    payload['scope_id']=str(GROUP)
+    e.bot=Bot() # an adapter without get_msg still forwards the incoming message
+    await bridge.on_message(e)
+    assert next(row for path,row in seen if path=='/bridge/message')['reply_to_id']=='1234'
+    await bridge.client.aclose()
