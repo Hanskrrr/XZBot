@@ -166,7 +166,11 @@ def open_management(root: Path):
     if platform.system() != 'Darwin':
         webbrowser.open(runtime_layout(root).core_url)
         print('Management is ready. Open data/admin.token locally and paste it into the page; do not share it.')
-        if os.name == 'nt':os.startfile(str(root / 'data/admin.token'))
+        if platform.system() == 'Windows':
+            # .token has no default Windows file association. Opening it via
+            # ShellExecute can falsely fail after both services are ready.
+            try:subprocess.Popen(['notepad.exe',str(root/'data/admin.token')])
+            except OSError:print('Open data/admin.token with a text editor if Notepad is unavailable.')
         return
     # Pass the private URL through stdin, not process arguments or terminal text.
     try:

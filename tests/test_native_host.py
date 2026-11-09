@@ -49,6 +49,22 @@ def test_private_file_open_and_permissions(tmp_path):
     assert host.python_at(tmp_path).name==('python.exe' if os.name=='nt' else 'python')
 
 
+def test_windows_management_does_not_require_token_file_association(tmp_path,monkeypatch,capsys):
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
+    import start_onebot
+    calls=[]
+    monkeypatch.setattr(start_onebot.platform,'system',lambda:'Windows')
+    monkeypatch.setattr(start_onebot.webbrowser,'open',lambda url:calls.append(('browser',url)))
+    monkeypatch.setattr(start_onebot.subprocess,'Popen',lambda argv:calls.append(('editor',argv)))
+    start_onebot.open_management(tmp_path)
+    assert calls[-1]==('editor',['notepad.exe',str(tmp_path/'data/admin.token')])
+    secret=token(tmp_path,'admin')
+    assert secret not in str(calls) and secret not in capsys.readouterr().out
+    def missing(*args):raise OSError('notepad unavailable')
+    monkeypatch.setattr(start_onebot.subprocess,'Popen',missing)
+    start_onebot.open_management(tmp_path)  # Still usable via the local file.
+
+
 def test_native_lock_excludes_another_process(tmp_path):
     path=tmp_path/'lock'
     with path.open('a') as f:

@@ -302,6 +302,18 @@ def create_app(root: Path | None = None) -> FastAPI:
     async def profiles_create(request: Request):
         return engine.profiles.create(await json_object(request))
 
+    @app.get('/admin/profile-templates', dependencies=[Depends(admin)])
+    def profile_templates():
+        from .starter_templates import catalog
+        return {'templates':catalog()}
+
+    @app.post('/admin/profile-templates/{key}', dependencies=[Depends(admin)])
+    async def profile_template_import(key: str):
+        from .starter_templates import import_profile
+        from starlette.concurrency import run_in_threadpool
+        if key not in {'azusa','hazel'}:raise HTTPException(404,'starter_profile_not_found')
+        return await run_in_threadpool(import_profile,engine.profiles,key)
+
     @app.post("/admin/profiles/import-from-manager", dependencies=[Depends(admin)])
     async def profiles_import(request: Request):
         from starlette.concurrency import run_in_threadpool

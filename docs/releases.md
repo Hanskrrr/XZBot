@@ -1,7 +1,7 @@
 # XZBot 0.9 原生发行版
 
 本版为 Release Candidate。三端共用同一业务核心和网页管理界面；Windows 无需 WSL。
-发布包只包含程序、示例、固定版本 uv 启动工具与许可证，不含任何个人凭据、角色资料、历史或 QQ 会话。
+发布包包含程序、阿梓与灰泽满两个公开基础角色、固定版本 uv 启动工具与许可证；不含个人凭据、私人历史、成员记忆或 QQ 会话。
 
 ## 下载与启动
 
@@ -23,6 +23,7 @@ Mac 原有启动入口自动连接；Linux 服务器在本机查看该文件，�
 ## Windows / Linux 连接原生 NapCat
 
 1. 按 [NapCat 官方说明](https://napneko.github.io/guide/boot/Shell)安装对应系统与 CPU 架构的 NapCat，退出它后配置。
+   Windows x64 可使用官方 `NapCat.Shell.Windows.OneKey.zip`：运行 `NapCatInstaller.exe`，随后用 `napcat.bat` 启动；手动安装方式则先安装 QQ，再使用 `NapCat.Shell.zip` 的 `launcher.bat`（Windows 10 用 `launcher-win10.bat`）。本项目不会替第三方安装器接受协议或捆绑 QQ。
 2. 在 XZBot「连接与权限」展开「Windows / Linux 原生 NapCat 连接配置」，下载当前账号的配置包，解压到 NapCat 的 `config` 目录。
 3. 如果已有 `onebot11_QQ号.json`，其中账号专属设置优先于通用 `onebot11.json`，将下载配置中的 `network.websocketClients` 同步到账号专属文件，或先备份再移走旧账号专属配置。不要保留旧的额外消息连接。
 4. 启动 NapCat。XZBot 默认连接本机 NapCat WebUI 6200，反向 WebSocket 6199；两者都只绑定回环地址。
@@ -50,6 +51,14 @@ Mac 原有启动入口自动连接；Linux 服务器在本机查看该文件，�
 - API key 在管理页输入。NapCat 连接配置包含本机访问令牌，不要上传 GitHub。
 - 不要将同一个 QQ 同时放在两套 Bot 中运行。更新前使用管理页备份；Linux 或 Windows 不直接使用 Mac 虚拟环境/钥匙串。
 
+## 内置角色与升级
+
+首次安装会创建阿梓、灰泽满两个 Profile，默认选择阿梓。包含完整人设、额外提示词默认版本、预设问答、别名、基础资料（阿梓 285 份、灰泽满 2 份）与 Fish 音色 ID。公开订阅来源已列入对象库，角色动态同步默认关闭；没有 QQ 接收目标或别人账号的白名单。填好自己的模型 Key、登录 QQ 并设置 Owner 后使用；语音需自行确认音色权限后开启。
+
+已有 `data/profiles.json` 或私人 `content/persona.md` 时不会自动覆盖。需要模板时，到「角色档案」选择「从阿梓模板新建」或「从灰泽满模板新建」。模板中的第三方资料保留各自来源与许可；萌娘百科资料标注 CC BY-NC-SA 4.0，不能将整套资料视作 MIT 授权。
+
+更新前备份。可将新包的程序文件合并到原目录，保留 `data/`、`content/`、`accounts/`、`config/local.json` 和 `config/runtime.json` 等本地配置，再运行启动入口；安装器按依赖指纹更新环境。不要用空模板覆盖现有数据，也不要把旧虚拟环境复制到另一台电脑。
+
 ## 本版新增
 
 「群聊参与 → 冷场发言 → 立即发起一次聊天」向当前选中的群生成并发送一次文字或语音开场（遵循当前角色的语音开关与授权），使用当前角色。
@@ -59,6 +68,6 @@ Mac 原有启动入口自动连接；Linux 服务器在本机查看该文件，�
 
 ## 验证边界
 
-GitHub Actions 分别在 Windows、macOS、Linux 安装依赖，测试原生文件锁/权限、管理 API、记忆与手动发言机制，并启动真实固定版本 AstrBot 桥接。
+GitHub Actions 分别在 Windows、macOS、Linux 测试原生文件锁/权限、管理 API、角色模板、提示词默认版本与手动发言机制。随后将实际待发布 ZIP 解压到带空格和中文的新目录，执行包内启动入口 `--no-open`，检查新装角色与真实固定版本 AstrBot 桥接。每个平台附带 `.verification.json`，记录该包 SHA256、提交号、检查结果及没有执行真实 QQ 登录这一边界。
 CI 不登录 QQ，也不使用任何真实模型密钥。Mac 现有 QQ 环境可本机验证；Windows/Linux 的实际扫码、腾讯收发、语音和订阅媒体需要在目标机器验收。
 可选 Gemini Balance 仍需目标平台安装其 Git 和依赖；发布测试不等于已经验证它在每个系统上运行。

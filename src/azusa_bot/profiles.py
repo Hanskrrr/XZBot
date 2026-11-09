@@ -132,7 +132,7 @@ class ProfileStore:
             result["fish_model_override"] = True
         return result
 
-    def create(self, body):
+    def create(self, body, *, initialize=None):
         if not isinstance(body,dict) or set(body)-{"name","description","persona","voice","address_names"}:
             raise ProfileError("profile_fields_invalid")
         name=self._text(body.get("name"),"name",60,required=True)
@@ -156,6 +156,7 @@ class ProfileStore:
                 (directory / "content/lore").mkdir(mode=0o700)
                 (directory / "content/assets").mkdir(mode=0o700)
                 private_write(directory / "content/assets/manifest.json","{}\n")
+                if initialize is not None:initialize(directory)
                 data["profiles"].append(item)
                 self._write(data)
             except Exception:
