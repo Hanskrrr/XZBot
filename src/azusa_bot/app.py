@@ -55,6 +55,8 @@ def create_app(root: Path | None = None) -> FastAPI:
     from .role_activity import selected_sources
     subscriptions.activity_sources = lambda: set(selected_sources(engine.profiles))
     subscriptions.activity_usage = lambda: selected_sources(engine.profiles,enabled_only=False)
+    from .role_activity import sync_all
+    subscriptions.activity_sync = lambda keys,backfill=False: sync_all(engine,subscriptions,only_sources=keys,backfill=backfill)
     accounts = AccountManager(root)
     from .qq_connection import QQConnection
     qq_connection = QQConnection(root)
@@ -74,8 +76,6 @@ def create_app(root: Path | None = None) -> FastAPI:
             try:
                 if activity_allowed(root):
                     await subscriptions.poll_once()
-                    from .role_activity import sync_all
-                    await asyncio.to_thread(sync_all,engine,subscriptions)
             except Exception:
                 engine.diagnostics.record("core","internal_failure")
             await asyncio.sleep(15)
@@ -203,7 +203,7 @@ def create_app(root: Path | None = None) -> FastAPI:
     admin = auth(admin_token)
     bridge = auth(bridge_token)
     from .subscription_library import create_router as subscription_library_router
-    app.include_router(subscription_library_router(subscriptions), dependencies=[Depends(admin)])
+    app.include_router(subscription_library_router(subscriptions,engine.profiles), dependencies=[Depends(admin)])
     app.include_router(gemini_router(gateway), dependencies=[Depends(admin)])
     app.include_router(memory_router(engine), dependencies=[Depends(admin)])
     from .memory_policies import create_router as memory_policy_router
@@ -410,7 +410,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         role_activity.save(engine.content_root,await json_object(request),observed)
         engine.invalidate_groups(reason="role_activity_changed")
         observed=role_activity.observations(subscriptions)
-        role_activity.sync(engine.content_root,observed)
+        await subscriptions.sync_activity(role_activity.config(engine.content_root)['sources'])
         from .subscription_library import saved_sources
         return role_activity.describe(engine.content_root,observed) | {'library':saved_sources(root)['sources']}
 

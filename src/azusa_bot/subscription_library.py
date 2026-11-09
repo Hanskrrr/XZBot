@@ -137,8 +137,50 @@ class SourceInput(BaseModel):
         return self
 
 
-def create_router(service):
+class RefreshInput(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    sources: list[str] = Field(min_length=1,max_length=20)
+    notify: bool = Field(default=False,strict=True)
+
+
+class SourceEditInput(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    source_id: str = Field(min_length=1,max_length=300)
+    name: str = Field(default='',max_length=80)
+    revision: int = Field(ge=1,strict=True)
+
+
+def create_router(service, profiles):
+    from . import subscription_edit, subscription_journal
+    subscription_edit.initialize(service)
+    try:subscription_edit.recover(service,profiles)
+    except (OSError,ValueError):pass  # Report pending recovery explicitly in the catalog.
     router = APIRouter(prefix='/admin/subscriptions')
+
+    @router.post('/refresh')
+    async def refresh(item: RefreshInput):
+        try:return await service.refresh(item.sources,notify=item.notify)
+        except ValueError as error:
+            raise HTTPException(409,str(error) if str(error).startswith('subscription_') else 'subscription_refresh_invalid') from None
+
+    @router.get('/runs')
+    def runs(source: str | None=None,before: int | None=None,limit:int=30):
+        try:return subscription_journal.list_runs(service,source=source,before=before,limit=limit)
+        except ValueError:raise HTTPException(400,'subscription_journal_query_invalid') from None
+
+    @router.patch('/sources/{key}')
+    async def edit_source(key:str,item:SourceEditInput):
+        try:return await subscription_edit.update(service,profiles,key,item.model_dump())
+        except (ValueError,OSError) as error:
+            code=str(error)
+            raise HTTPException(409,code if code.startswith('subscription_') and len(code)<100 else 'subscription_source_edit_incomplete') from None
+
+    @router.post('/recover-edits')
+    async def recover_edits():
+        async with service._operations:
+            try:subscription_edit.recover(service,profiles)
+            except (OSError,ValueError):raise HTTPException(409,'subscription_source_edit_conflict') from None
+        return {'recovered':True}
 
     @router.get('/library')
     def library():
@@ -146,7 +188,8 @@ def create_router(service):
 
     @router.get('/sources')
     def sources():
-        return source_catalog.describe(service)
+        with service.db() as db:pending=db.execute('SELECT COUNT(*) FROM subscription_source_edits').fetchone()[0]
+        return source_catalog.describe(service)|{'pending_edits':pending}
 
     @router.post('/sources')
     async def add_source(item: SourceInput):

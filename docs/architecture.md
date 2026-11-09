@@ -48,3 +48,11 @@ AstrBot 原生 PersonaManager/ConversationManager/Provider 不构成本项目当
 排列依据：[Anthropic 长上下文建议](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices)建议长资料靠前、问题靠后；[AstrBot 固定版本的普通请求实现](https://github.com/AstrBotDevs/AstrBot/blob/61335414433db721b3f7ecc93f90deafe0a59d78/astrbot/core/provider/sources/openai_source.py#L958)先复制 contexts，再追加当前消息，并把 system 放在开头。这不是所有工具协议的硬性规定：原生工具调用通常继续追加工具结果。XZBot 当前使用自己的有界资料查询循环，因此每轮查询完成后可重新排列为“背景 → 近期聊天 → 当前消息”，没有破坏原生工具消息配对。顺序优化也不等于角色效果或事实准确性的保证。
 
 提示词措辞无法单独保证角色表现。离线回归验证的是名字隔离、实际组装顺序、可编辑性、近期上下文、检索与发送约束；最终语气仍受人设、示例和所选模型影响。
+
+## 订阅来源与投递溯源
+
+`rooms` 保留账号内单一来源快照，`subscriptions` 保存每个 QQ 接收方的独立发送游标；角色绑定在各 Profile 的 `role_activity.json`。手动获取和轮询共用来源读取、限流、校验与去重路径，由 `_operations` 串行化。仅同步角色时保存来源快照而不推进 QQ 游标，不会吞掉下一次正常通知；手动初次收录可绕过角色绑定时的初始日期门槛，但使用原发布时间决定 24 小时上下文窗口。
+
+`subscription_runs` 保存来源读取及角色归档报告；outbox 的 `run_id` 关联本次实际生成的每个目标通知，查看记录时读取最新发送回执。日志是可核对的观察结果，不把入队视作送达，也不推断未取得的内容。正文预览限长并过滤疑似凭据，记录保留 30 天 / 最多 10,000 条。
+
+来源 ID 修改在 SQLite 事务中同时移动消费者、撤销待发送记录、重置新来源基线，并保存 Profile 文件修改的恢复记录。文件按原子写入更新，启动时重放；未完成恢复时暂停来源轮询，避免数据库与角色绑定不一致。名称修改不重置发送游标，历史回执的来源名称和 ID 不随当前对象修改。

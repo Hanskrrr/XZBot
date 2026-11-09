@@ -151,12 +151,13 @@ def _live_document(r,previous,now):
         'context_until':stamp+DAY,'always_include':False,'event_date':date[:10]}
 
 
-def sync(root,observed,now=None):
+def sync(root,observed,now=None,*,only_sources=None,backfill=False):
     from . import lore
     now=time.time() if now is None else now
     with lore._store(root).locked():
         cfg=config(root)
-        if not cfg['enabled']:return
+        if not cfg['enabled']:return []
+        reports=[]
         state=_read(root,'role_activity_state.json',{'seen':[],'sources':{}})
         before=deepcopy(state);seen=set(state['seen'])
         # Reconcile an interrupted write between lore commit and state commit.
@@ -166,43 +167,72 @@ def sync(root,observed,now=None):
             names={json.loads(r[0])['name'] for r in db.execute('SELECT metadata FROM documents')}
         present={r['key'] for r in observed}
         for key in cfg['sources']:
+            if only_sources is not None and key not in only_sources:continue
             if key not in present:state['sources'][key]={'enabled':False,'last_error':'subscription_removed'}
         for r in observed:
             if r['key'] not in cfg['sources']:continue
+            if only_sources is not None and r['key'] not in only_sources:continue
+            report={'source_key':r['key'],'status':'unchanged','imported_count':0,'existing_count':0,
+                    'skipped_count':0,'archive_only_count':0,'documents':[],'error':''}
+            reports.append(report)
             previous=state['sources'].get(r['key'],{})
             saved=state['sources'][r['key']]={k:r[k] for k in ('key','name','type','title','url','last_check','last_error','enabled','live_status','session')}
             saved.update({k:previous[k] for k in ('last_ingest_check','last_live_session','archive_error','config_revision') if k in previous})
-            if not r['enabled'] or r['last_error'] or r['last_check']==previous.get('last_ingest_check') and previous.get('config_revision')==revision(cfg):continue
+            if not r['enabled'] or r['last_error']:
+                report.update(status='skipped',error=r['last_error'] or 'source_disabled');continue
+            if not backfill and r['last_check']==previous.get('last_ingest_check') and previous.get('config_revision')==revision(cfg):continue
             payload=json.loads(r['payload'])
             docs=[]
             if r['type']=='bilibili_live':docs.append(_live_document(r,previous,now))
             else:
                 for event in payload.get('events',[])[:20]:
-                    if event.get('published_at',0)<max(0,cfg['since']-DAY):continue
+                    if not backfill and event.get('published_at',0)<max(0,cfg['since']-DAY):
+                        report['skipped_count']+=1;continue
                     docs.append(_video_document(r,event,now,cfg.get('clip_keywords',{}).get(r['key'],[])) if r['type']=='bilibili_video' else _post_document(r,event,now))
             try:
                 for doc in docs:
-                    if doc is None or doc['name'] in seen:continue
+                    if doc is None:
+                        report['skipped_count']+=1;continue
+                    if doc['name'] in seen:
+                        report['existing_count']+=1;continue
                     if doc['name'] not in names:
                         lore.import_documents(root,[doc]);names.add(doc['name'])
+                        report['imported_count']+=1
+                        report['archive_only_count']+=int(doc['context_until']<=now)
+                        report['documents'].append({'name':doc['name'],'title':doc['title'],
+                                                    'context_until':doc['context_until']})
+                    else:report['existing_count']+=1
                     state['seen'].append(doc['name']);seen.add(doc['name'])
             except ValueError:
                 saved['archive_error']='role_activity_archive_failed'
+                report.update(status='failed',error='role_activity_archive_failed')
             else:
+                report['status']='imported' if report['imported_count'] else 'unchanged'
                 saved['last_ingest_check']=r['last_check'];saved['config_revision']=revision(cfg);saved.pop('archive_error',None)
                 if r['type']=='bilibili_live':saved['last_live_session']=r['session'] if r['live_status']==1 else ''
         # Keep tombstones for deleted posts; older feed items are barred by since.
         state['seen']=state['seen'][-10000:]
         if before!=state:lore._atomic(Path(root)/'content/role_activity_state.json',json.dumps(state,ensure_ascii=False).encode())
+        return reports
 
 
-def sync_all(manager,subscriptions):
+def sync_all(manager,subscriptions,*,only_sources=None,backfill=False):
     rows=observations(subscriptions)
+    reports=[]
     # Hold profile inventory against deletion while finishing a local ingest.
     with manager.profiles.lock:
         for row in manager.profiles.list()['profiles']:
             root=manager.profiles.directory(row['id'])
-            if config(root)['enabled']:sync(root,rows)
+            cfg=config(root)
+            if only_sources is not None and not set(cfg['sources'])&set(only_sources):continue
+            if cfg['enabled']:
+                changes=sync(root,rows,subscriptions.clock(),only_sources=only_sources,backfill=backfill)
+            else:
+                changes=[{'source_key':key,'status':'paused','imported_count':0,'existing_count':0,
+                          'skipped_count':0,'archive_only_count':0,'documents':[],'error':''}
+                         for key in cfg['sources'] if only_sources is None or key in only_sources]
+            reports.extend(change|{'profile_id':row['id'],'profile_name':row['name']} for change in changes)
+    return reports
 
 
 def current(root,now=None):

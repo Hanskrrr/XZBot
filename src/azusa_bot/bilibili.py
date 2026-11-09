@@ -106,6 +106,7 @@ class BilibiliSubscriptions:
         self._operations=asyncio.Lock()
         self.activity_sources = lambda: set()
         self.activity_usage = lambda: {}
+        self.activity_sync = lambda keys, backfill=False: []
         self.sources=Sources(self.root,client,clock=clock)
         self.cards=Cards(self.root,client)
         with self.db() as db:
@@ -124,14 +125,18 @@ class BilibiliSubscriptions:
             """)
             # Additive migration: legacy rows retain live semantics and text-only
             # delivery. The old uniqueness constraints and delivery IDs survive.
-            additions={"rooms":{"type":"TEXT NOT NULL DEFAULT 'bilibili_live'", "payload":"TEXT NOT NULL DEFAULT '{}'"},
+            additions={"rooms":{"type":"TEXT NOT NULL DEFAULT 'bilibili_live'", "payload":"TEXT NOT NULL DEFAULT '{}'", "name_override":"TEXT NOT NULL DEFAULT ''", "source_revision":"INTEGER NOT NULL DEFAULT 1"},
                        "subscriptions":{"include_image":"INTEGER NOT NULL DEFAULT 0", "needs_rebaseline":"INTEGER NOT NULL DEFAULT 0"},
-                       "outbox":{"image_file":"TEXT NOT NULL DEFAULT ''", "image_error":"TEXT NOT NULL DEFAULT ''", "type":"TEXT NOT NULL DEFAULT 'bilibili_live'"}}
+                       "outbox":{"image_file":"TEXT NOT NULL DEFAULT ''", "image_error":"TEXT NOT NULL DEFAULT ''", "type":"TEXT NOT NULL DEFAULT 'bilibili_live'", "run_id":"INTEGER", "source_key":"TEXT NOT NULL DEFAULT ''", "source_name":"TEXT NOT NULL DEFAULT ''"}}
             for table,columns in additions.items():
                 existing={row[1] for row in db.execute("PRAGMA table_info("+table+")")}
                 for column,definition in columns.items():
                     if column not in existing:db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             db.execute("CREATE TABLE IF NOT EXISTS subscription_media(path TEXT PRIMARY KEY,created_at REAL NOT NULL)")
+            from .subscription_journal import initialize
+            initialize(db)
+            db.execute('CREATE INDEX IF NOT EXISTS outbox_run ON outbox(run_id)')
+            db.execute('CREATE TABLE IF NOT EXISTS subscription_source_edits (id TEXT PRIMARY KEY, edits TEXT NOT NULL)')
 
     @contextmanager
     def db(self):
@@ -298,7 +303,7 @@ class BilibiliSubscriptions:
             payload['events']=info.get('events',[])[-20:]
         db.execute("""INSERT INTO rooms(room_id,uid,name,title,live_status,session,last_check,next_poll,failures,last_error,type,payload)
           VALUES (?,?,?,?,?,?,?,?,0,'',?,?) ON CONFLICT(room_id) DO UPDATE SET
-          uid=excluded.uid,name=CASE WHEN excluded.name='' THEN rooms.name ELSE excluded.name END,
+          uid=excluded.uid,name=CASE WHEN rooms.name_override<>'' THEN rooms.name_override WHEN excluded.name='' THEN rooms.name ELSE excluded.name END,
           title=excluded.title,live_status=excluded.live_status,session=excluded.session,
           last_check=excluded.last_check,next_poll=excluded.next_poll,failures=0,last_error='',type=excluded.type,payload=excluded.payload""",
           (info["room_id"],info["uid"],info["name"],info["title"],info["live_status"],info["session"],now,
@@ -468,7 +473,9 @@ class BilibiliSubscriptions:
     def status(self):
         with self.db() as db:
             self._expire(db)
-            rows=[dict(row) for row in db.execute("SELECT id,subscription_id,type,room_id,kind,target_id,status,image_error,created_at,claimed_at,completed_at FROM outbox ORDER BY created_at DESC LIMIT 30")]
+            rows=[dict(row) for row in db.execute("SELECT id,subscription_id,type,room_id,kind,target_id,status,image_error,created_at,claimed_at,completed_at,text,session,source_key,source_name,run_id FROM outbox ORDER BY created_at DESC LIMIT 30")]
+            from .subscription_journal import clean
+            for row in rows:row['text']=clean(row['text'],1200)
             room=db.execute("SELECT MAX(last_check),MIN(next_poll) FROM rooms WHERE room_id IN (SELECT room_id FROM subscriptions WHERE enabled=1)").fetchone()
             error=db.execute("SELECT last_error FROM rooms WHERE last_error<>'' ORDER BY last_check DESC LIMIT 1").fetchone()
             return {"poll_interval_seconds":POLL_SECONDS,"poll_intervals":INTERVALS,"delivery_interval_seconds":DELIVERY_INTERVAL_SECONDS,"subscriptions":db.execute("SELECT COUNT(*) FROM subscriptions").fetchone()[0],
@@ -476,32 +483,74 @@ class BilibiliSubscriptions:
               "pending":db.execute("SELECT COUNT(*) FROM outbox WHERE status='pending'").fetchone()[0],
               "last_poll_at":room[0],"next_poll_at":room[1],"last_error":error[0] if error else "","deliveries":rows}
 
-    async def poll_once(self):
+    async def refresh(self, keys, *, notify=False):
+        from .source_catalog import validate_key
+        if (not isinstance(keys,list) or not 1<=len(keys)<=20 or type(notify) is not bool
+                or any(not isinstance(key,str) for key in keys)):
+            raise ValueError('subscription_refresh_invalid')
+        keys=list(dict.fromkeys(keys))
+        for key in keys:validate_key(key)
+        if self._operations.locked():raise ValueError('subscription_refresh_busy')
+        if notify and not activity_allowed(self.root):raise ValueError('subscription_refresh_bot_paused')
+        return await self.poll_once(manual_keys=keys,notify=notify)
+
+    async def sync_activity(self, keys):
+        """Record cached imports after an explicit role-binding change; no HTTP."""
+        from . import subscription_journal as journal
+        from .source_catalog import source_key
+        async with self._operations:
+            with self.db() as db:rooms=[dict(row) for row in db.execute('SELECT * FROM rooms') if source_key(row) in keys]
+            roles=await asyncio.to_thread(self.activity_sync,set(keys))
+            for room in rooms:
+                number=source_key(room).split(':',1)[1]
+                run=journal.begin(self,room,'binding')
+                info=room|json.loads(room['payload'])|{'source_id':number,'url':journal.source_url(room['type'],number)}
+                journal.finish(self,run,info=info,cached=True,state='success' if room['last_check'] and not room['last_error'] else 'waiting',
+                               roles=[row for row in roles if row['source_key']==source_key(room)])
+
+    async def poll_once(self, *, manual_keys=None, notify=True):
+        from . import subscription_journal as journal
+        from .source_catalog import source_key
+        manual=manual_keys is not None
         epoch = read_control(self.root)["epoch"]
-        if not activity_allowed(self.root, epoch):return {"checked":0}
+        def stopped():return (not manual or notify) and not activity_allowed(self.root,epoch)
+        if stopped():return {"checked":0}
         if self._operations.locked():return {"checked":0}
         async with self._operations:
-            if not activity_allowed(self.root, epoch):return {"checked":0}
+            if stopped():return {"checked":0}
             self._prune_media()
+            role_sources = self.activity_sources()
             with self.db() as db:
+                if db.execute('SELECT 1 FROM subscription_source_edits LIMIT 1').fetchone():
+                    if manual:raise ValueError('subscription_source_edit_incomplete')
+                    return {'checked':0}
                 self._expire(db)
-                role_sources = self.activity_sources()
                 active_rooms = {row[0] for row in db.execute("SELECT DISTINCT room_id FROM subscriptions WHERE enabled=1")}
-                from .source_catalog import source_key
-                due = [dict(row) for row in db.execute("SELECT * FROM rooms WHERE next_poll<=?", (self.clock(),))
-                       if row["room_id"] in active_rooms or source_key(row) in role_sources]
+                all_rooms=[dict(row) for row in db.execute('SELECT * FROM rooms')]
+                if manual and set(manual_keys)-{source_key(row) for row in all_rooms}:
+                    raise ValueError('subscription_source_not_found')
+                due = [row for row in all_rooms if (source_key(row) in manual_keys if manual else
+                       row['next_poll']<=self.clock() and (row['room_id'] in active_rooms or source_key(row) in role_sources))]
             steam,steam_error={},None
-            steam_ids=[row["uid"] for row in due if row["type"]=="steam"]
+            def fresh_cache(row):return manual and row['last_check']>0 and not row['last_error'] and 0<=self.clock()-row['last_check']<30
+            steam_ids=[row["uid"] for row in due if row["type"]=="steam" and not fresh_cache(row)]
             if steam_ids:
                 try:steam=await self.sources.steam_many(steam_ids)
                 except BilibiliError as error:steam_error=error
             checked=0
+            runs=[]
             dynamic_reads={}
             due.sort(key=lambda row:row["type"]=="bilibili_video")
             for room in due:
-                if not activity_allowed(self.root, epoch):return {"checked":checked}
+                if stopped():return {"checked":checked, **({"run_ids":runs} if manual else {})}
+                run=journal.begin(self,room,'manual' if manual else 'scheduled');runs.append(run)
+                cached=False
                 try:
-                    if room["type"]=="steam":
+                    if fresh_cache(room):
+                        cached=True
+                        info=room|json.loads(room['payload'])|{'source_id':source_key(room).split(':',1)[1],
+                             'url':journal.source_url(room['type'],source_key(room).split(':',1)[1])}
+                    elif room["type"]=="steam":
                         if steam_error:raise steam_error
                         if room["uid"] not in steam:raise BilibiliError("steam_profile_private_or_unavailable")
                         info=steam[room["uid"]]
@@ -514,11 +563,13 @@ class BilibiliSubscriptions:
                         if isinstance(snapshot,BilibiliError):raise snapshot
                         info=self.sources.videos_from_dynamic(snapshot) if room["type"]=="bilibili_video" and snapshot["type"]!="bilibili_video" else snapshot
                     else:info=await self._read_existing(room)
-                    if not activity_allowed(self.root, epoch):return {"checked":checked}
+                    if stopped():
+                        journal.finish(self,run,state='cancelled');return {"checked":checked, **({"run_ids":runs} if manual else {})}
                     if info["room_id"] != room["room_id"] or (room["uid"] and info["uid"] != room["uid"]):
                         raise BilibiliError("bilibili_identity_mismatch")
                 except BilibiliError as error:
-                    if not activity_allowed(self.root, epoch):return {"checked":checked}
+                    if stopped():
+                        journal.finish(self,run,state='cancelled');return {"checked":checked, **({"run_ids":runs} if manual else {})}
                     with self.db() as db:
                         now=self.clock()
                         # A preview may already hold the source lease or have
@@ -533,26 +584,45 @@ class BilibiliSubscriptions:
                             now+min(3600,INTERVALS[room["type"]]*2**failures),error.retry_at)
                         db.execute("UPDATE rooms SET last_check=?,next_poll=?,failures=?,last_error=? WHERE room_id=?",
                             (now,next_poll,failures,str(error),room["room_id"]))
+                    with self.db() as db:
+                        targets=[{'subscription_id':r['id'],'kind':r['kind'],'target_id':r['target_id'],'reason':'source_failed'} for r in db.execute('SELECT id,kind,target_id FROM subscriptions WHERE room_id=?',(room['room_id'],))]
+                    try:roles=await asyncio.to_thread(self.activity_sync,{source_key(room)})
+                    except Exception:roles=[]
+                    journal.finish(self,run,state='deferred' if admission_wait else 'failed',error=str(error),retry_at=next_poll,targets=targets,roles=roles)
                     continue
+                if room.get('name_override'):info=info|{'name':room['name_override']}
                 # Require two successful observations of a Steam change, avoiding
                 # most single-poll transient disconnect/start notifications.
                 with self.db() as db:
                     if not db.execute("SELECT 1 FROM rooms WHERE room_id=?",(room["room_id"],)).fetchone():continue
+                    if cached and room['type']=='steam' and json.loads(room['payload']).get('candidate_session'):
+                        checked+=1
+                        journal.finish(self,run,info=info,state='confirming',cached=True,db=db)
+                        continue
                     if room["type"]=="steam" and room["session"]!=info["session"]:
                         payload=json.loads(room["payload"])
                         if payload.get("candidate_session")!=info["session"]:
                             payload["candidate_session"]=info["session"]
                             db.execute("UPDATE rooms SET payload=?,last_check=?,next_poll=?,last_error='',failures=0 WHERE room_id=?",
                                 (json.dumps(payload),self.clock(),self.clock()+INTERVALS["steam"],room["room_id"]))
-                            checked+=1;continue
-                    subs=[dict(row) for row in db.execute("SELECT * FROM subscriptions WHERE room_id=? AND enabled=1",(room["room_id"],))]
+                            checked+=1
+                            journal.finish(self,run,info=info,state='confirming',db=db)
+                            continue
+                    subs=[dict(row) for row in db.execute("SELECT * FROM subscriptions WHERE room_id=?",(room["room_id"],))]
                 deliveries=[]
+                targets=[]
                 rendered_events={}
                 for sub in subs:
-                    if sub["needs_rebaseline"]:continue
-                    for event in self._events(info,sub):
-                        if not activity_allowed(self.root, epoch):return {"checked":checked}
-                        if not self._allowed(sub):continue
+                    reason=('paused' if not sub['enabled'] else 'manual_sync_only' if not notify else
+                            'baseline' if sub['needs_rebaseline'] else 'not_allowed' if not self._allowed(sub) else 'no_new_event')
+                    target={'subscription_id':sub['id'],'kind':sub['kind'],'target_id':sub['target_id'],'reason':reason}
+                    targets.append(target)
+                    if reason!='no_new_event':continue
+                    events=self._events(info,sub)
+                    if events:target['reason']='queued'
+                    for event in events:
+                        if stopped():
+                            journal.finish(self,run,state='cancelled');return {"checked":checked, **({"run_ids":runs} if manual else {})}
                         image_file,image_error="",""
                         if sub["include_image"]:
                             # One event can target many groups. Reuse its card
@@ -563,31 +633,42 @@ class BilibiliSubscriptions:
                             image_file,image_error=rendered_events[event["session"]]
                         deliveries.append((sub,event,image_file,image_error))
                 with self.db() as db:
-                    if not activity_allowed(self.root, epoch):return {"checked":checked}
+                    if stopped():
+                        journal.finish(self,run,state='cancelled',db=db);return {"checked":checked, **({"run_ids":runs} if manual else {})}
                     # Pause/delete can revoke during image HTTP or rendering.
                     if not db.execute("SELECT 1 FROM rooms WHERE room_id=?",(room["room_id"],)).fetchone():continue
-                    self._save_room(db,info);checked+=1
-                    if room["type"]=="bilibili_live":
+                    if not cached:self._save_room(db,info)
+                    checked+=1
+                    if notify and room["type"]=="bilibili_live":
                         db.execute("UPDATE outbox SET status='expired',completed_at=? WHERE room_id=? AND status='pending' AND session<>?",
                             (self.clock(),room["room_id"],info["session"]))
-                    elif room["type"]=="steam" and room["session"]!=info["session"]:
+                    elif notify and room["type"]=="steam" and room["session"]!=info["session"]:
                         db.execute("UPDATE outbox SET status='expired',completed_at=? WHERE room_id=? AND status='pending'",
                             (self.clock(),room["room_id"]))
                     for sub,event,image_file,image_error in deliveries:
                         current=db.execute("SELECT * FROM subscriptions WHERE id=?",(sub["id"],)).fetchone()
                         if not current or not current["enabled"] or current["revision"]!=sub["revision"] or not self._allowed(current):continue
-                        db.execute("""INSERT OR IGNORE INTO outbox(id,subscription_id,room_id,session,self_id,kind,target_id,revision,text,status,created_at,image_file,image_error,type)
-                          VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)""",
-                          (uuid.uuid4().hex,sub["id"],info["room_id"],event["session"],sub["self_id"],sub["kind"],sub["target_id"],sub["revision"],event["text"],self.clock(),image_file,image_error,info["type"]))
+                        db.execute("""INSERT OR IGNORE INTO outbox(id,subscription_id,room_id,session,self_id,kind,target_id,revision,text,status,created_at,image_file,image_error,type,run_id,source_key,source_name)
+                          VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?,?,?)""",
+                          (uuid.uuid4().hex,sub["id"],info["room_id"],event["session"],sub["self_id"],sub["kind"],sub["target_id"],sub["revision"],event["text"],self.clock(),image_file,image_error,info["type"],run,source_key(room),journal.clean(info['name'],80)))
                         if image_file:db.execute("INSERT OR REPLACE INTO subscription_media VALUES (?,?)",(image_file,self.clock()))
                     for sub in subs:
+                        if not notify:continue  # A local import must not consume QQ's send cursor.
                         # Always advance observation baselines, even if delivery is
                         # disabled globally, so later enabling cannot flood history.
                         baseline=info["session"]
                         if info["type"] in {"bilibili_dynamic", "bilibili_video", "weibo"}:baseline=str(max(int(sub["last_session"] or "0"),int(baseline)))
                         db.execute("UPDATE subscriptions SET last_status=?,last_session=?,needs_rebaseline=0 WHERE id=? AND enabled=1 AND revision=?",
                             (info["live_status"],baseline,sub["id"],sub["revision"]))
-            return {"checked":checked}
+                try:
+                    roles=await asyncio.to_thread(self.activity_sync,{source_key(room)},backfill=manual)
+                except Exception:
+                    journal.finish(self,run,info=info,cached=cached,targets=targets,state='partial',error='role_activity_sync_failed')
+                else:
+                    journal.finish(self,run,info=info,cached=cached,targets=targets,roles=roles,
+                                   state='partial' if any(r.get('status')=='failed' for r in roles) else 'success',
+                                   error='role_activity_archive_failed' if any(r.get('status')=='failed' for r in roles) else '')
+            return {"checked":checked, **({'run_ids':runs} if manual else {})}
 
     def _events(self,info,sub):
         if info["type"]=="bilibili_live":

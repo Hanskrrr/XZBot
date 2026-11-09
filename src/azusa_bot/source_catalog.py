@@ -40,14 +40,16 @@ def remember(service, kind, number, *, name='', uid=None):
 
 def describe(service):
     usage=service.activity_usage()
+    active_sources=service.activity_sources()
     with service.db() as db:
-        rows=[dict(r) for r in db.execute('SELECT room_id,uid,name,type,last_check,next_poll,last_error FROM rooms ORDER BY type,room_id')]
+        rows=[dict(r) for r in db.execute('SELECT room_id,uid,name,name_override,source_revision,type,last_check,next_poll,last_error FROM rooms ORDER BY type,room_id')]
         for row in rows:
             row['key']=source_key(row)
             row['source_id']=row['room_id'] if row['type']=='bilibili_live' else row['uid']
             row['push_count']=db.execute('SELECT COUNT(*) FROM subscriptions WHERE room_id=?',(row['room_id'],)).fetchone()[0]
+            row['targets']=[dict(r) for r in db.execute('SELECT kind,target_id,enabled,include_image FROM subscriptions WHERE room_id=?',(row['room_id'],))]
             row['roles']=usage.get(row['key'],[])
-            row['polling']=row['key'] in service.activity_sources() or bool(db.execute('SELECT 1 FROM subscriptions WHERE room_id=? AND enabled=1',(row['room_id'],)).fetchone())
+            row['polling']=row['key'] in active_sources or bool(db.execute('SELECT 1 FROM subscriptions WHERE room_id=? AND enabled=1',(row['room_id'],)).fetchone())
     return {'sources':rows}
 
 
