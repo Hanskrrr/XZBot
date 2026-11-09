@@ -113,17 +113,18 @@ def curl_upload(url, token, path):
 
     curl is available on GitHub's Ubuntu runners. Authentication is supplied on
     stdin, never in command arguments, URLs, progress output or response dumps.
-    No redirects or automatic upload retries are enabled.
+    The access_token text form field follows Gitee OpenAPI v5. curl reads its
+    value from stdin before sending the file. No redirects or upload retries.
     """
     require('\n' not in token and '\r' not in token, 'invalid_credential_format')
     deadline = 300 if path.stat().st_size > 1024 * 1024 else 60
     command = ['curl', '--silent', '--show-error', '--proto', '=https',
                '--connect-timeout', '20', '--max-time', str(deadline), '--retry', '0',
-               '--header', '@-', '--output', os.devnull,
+               '--form', 'access_token=<-', '--output', os.devnull,
                '--write-out', '%{http_code} %{size_upload} %{speed_upload}',
                '--form', f'file=@{path};filename={path.name};type=application/octet-stream', url]
     try:
-        result = subprocess.run(command, input=f'Authorization: Bearer {token}\n',
+        result = subprocess.run(command, input=token,
                                 capture_output=True, text=True, timeout=deadline + 30)
     except (OSError, subprocess.SubprocessError):
         raise SyncError('gitee_upload_process_failed_outcome_uncertain') from None

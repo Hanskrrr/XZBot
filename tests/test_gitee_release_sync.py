@@ -241,8 +241,8 @@ def test_curl_upload_keeps_token_off_argv_and_enforces_total_timeout(tmp_path, m
         target.truncate(size)
     def run(command, **kwargs):
         assert TOKEN not in repr(command)
-        assert command[command.index('--header') + 1] == '@-'
-        assert kwargs['input'] == f'Authorization: Bearer {TOKEN}\n'
+        assert command[command.index('--form') + 1] == 'access_token=<-'
+        assert kwargs['input'] == TOKEN
         assert command[command.index('--max-time') + 1] == str(deadline)
         assert '--location' not in command
         assert kwargs['timeout'] == deadline + 30
@@ -257,6 +257,6 @@ def test_curl_upload_keeps_token_off_argv_and_enforces_total_timeout(tmp_path, m
     assert TOKEN not in output.out + output.err
 
 
-def test_curl_upload_rejects_header_injection(tmp_path):
+def test_curl_upload_rejects_malformed_credential(tmp_path):
     with pytest.raises(sync.SyncError, match='invalid_credential_format'):
         sync.curl_upload('https://gitee.com/api/v5/upload', 'invalid\nheader: value', tmp_path / 'a.zip')
