@@ -80,7 +80,13 @@ class Server:
         raise AssertionError((request.method, path))
 
     def api(self):
-        return sync.Gitee('example/XZBot', TOKEN, client=httpx.Client(transport=httpx.MockTransport(self)), sleep=lambda _: None)
+        client = httpx.Client(transport=httpx.MockTransport(self))
+        api = sync.Gitee('example/XZBot', TOKEN, client=client, sleep=lambda _: None)
+        def upload(url, token, path):
+            with path.open('rb') as source:
+                api.request('POST', url.removeprefix(api.base), files={'file': (path.name, source, 'application/octet-stream')})
+        api.uploader = upload
+        return api
 
 
 def test_complete_publish_and_idempotent_rerun(bundle):
@@ -225,15 +231,29 @@ def test_dry_run_needs_no_gitee_token_and_performs_no_write(bundle, monkeypatch,
     assert '未写入 Gitee' in capsys.readouterr().out
 
 
-def test_upload_reader_reports_progress_and_enforces_body_deadline(tmp_path, monkeypatch, capsys):
-    path = tmp_path / 'release.zip'
+@pytest.mark.parametrize('status,exit_code,expected', [('201',0,None), ('000',28,'gitee_upload_curl_28'), ('413',0,'gitee_http_413')])
+def test_curl_upload_keeps_token_off_argv_and_enforces_total_timeout(tmp_path, monkeypatch, capsys, status, exit_code, expected):
+    from types import SimpleNamespace
+    path = tmp_path / 'package.zip'
     path.write_bytes(b'package')
-    with path.open('rb') as source:
-        reader = sync.UploadReader(source, path.name)
-        assert reader.fileno() == source.fileno()
-        assert reader.read() == b'package'
-        assert reader.read() == b''
-        assert 'release.zip' in capsys.readouterr().out
-        monkeypatch.setattr(sync.time, 'monotonic', lambda: reader.started + 601)
-        with pytest.raises(sync.SyncError, match='gitee_upload_body_deadline'):
-            reader.read()
+    def run(command, **kwargs):
+        assert TOKEN not in repr(command)
+        assert command[command.index('--header') + 1] == '@-'
+        assert kwargs['input'] == f'Authorization: Bearer {TOKEN}\n'
+        assert command[command.index('--max-time') + 1] == '300'
+        assert '--location' not in command
+        assert kwargs['timeout'] == 330
+        return SimpleNamespace(stdout=f'{status} 1234 512', stderr=TOKEN, returncode=exit_code)
+    monkeypatch.setattr(sync.subprocess, 'run', run)
+    if expected:
+        with pytest.raises(sync.SyncError, match=expected):
+            sync.curl_upload('https://gitee.com/api/v5/upload', TOKEN, path)
+    else:
+        sync.curl_upload('https://gitee.com/api/v5/upload', TOKEN, path)
+    output = capsys.readouterr()
+    assert TOKEN not in output.out + output.err
+
+
+def test_curl_upload_rejects_header_injection(tmp_path):
+    with pytest.raises(sync.SyncError, match='invalid_credential_format'):
+        sync.curl_upload('https://gitee.com/api/v5/upload', 'invalid\nheader: value', tmp_path / 'a.zip')

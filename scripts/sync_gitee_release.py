@@ -26,29 +26,6 @@ MAX_FILE = 100 * 1024 * 1024
 API = 'https://gitee.com/api/v5'
 
 
-class UploadReader:
-    """Report streamed bytes without logging request headers or response bodies."""
-
-    def __init__(self, source, name):
-        self.source = source
-        self.name = name
-        self.started = time.monotonic()
-        self.sent = 0
-        self.reported = 0
-
-    def __getattr__(self, name):
-        return getattr(self.source, name)
-
-    def read(self, size=-1):
-        require(time.monotonic() - self.started <= 600, 'gitee_upload_body_deadline')
-        block = self.source.read(size)
-        self.sent += len(block)
-        if self.sent - self.reported >= 5 * 1024 * 1024 or not block:
-            print(f'Upload stream: {self.name} {self.sent / 1024 / 1024:.1f} MiB', flush=True)
-            self.reported = self.sent
-        return block
-
-
 class SyncError(Exception):
     """Only locally defined, credential-free codes may be shown in CI logs."""
 
@@ -131,12 +108,41 @@ def validate_packages(directory, meta, commit):
         require(all(report.get(k) == 'passed' for k in CHECKS), 'source_verification_not_passed')
 
 
+def curl_upload(url, token, path):
+    """Bound the entire upload, not just individual socket waits.
+
+    curl is available on GitHub's Ubuntu runners. Authentication is supplied on
+    stdin, never in command arguments, URLs, progress output or response dumps.
+    No redirects or automatic upload retries are enabled.
+    """
+    require('\n' not in token and '\r' not in token, 'invalid_credential_format')
+    command = ['curl', '--silent', '--show-error', '--proto', '=https',
+               '--connect-timeout', '20', '--max-time', '300', '--retry', '0',
+               '--header', '@-', '--output', os.devnull,
+               '--write-out', '%{http_code} %{size_upload} %{speed_upload}',
+               '--form', f'file=@{path};filename={path.name};type=application/octet-stream', url]
+    try:
+        result = subprocess.run(command, input=f'Authorization: Bearer {token}\n',
+                                capture_output=True, text=True, timeout=330)
+    except (OSError, subprocess.SubprocessError):
+        raise SyncError('gitee_upload_process_failed_outcome_uncertain') from None
+    try:
+        code, sent, speed = result.stdout.strip().split()
+        status, sent, speed = int(code), int(sent), float(speed)
+    except (ValueError, TypeError):
+        raise SyncError('gitee_upload_invalid_receipt') from None
+    print(f'Upload result: {path.name}, HTTP {status}, bytes {sent}, speed {speed:.0f} B/s', flush=True)
+    require(result.returncode == 0, f'gitee_upload_curl_{result.returncode}_outcome_uncertain')
+    require(200 <= status < 300, f'gitee_http_{status}')
+
+
 class Gitee:
-    def __init__(self, repo, token, *, client=None, sleep=time.sleep):
+    def __init__(self, repo, token, *, client=None, sleep=time.sleep, uploader=curl_upload):
         self.base = f'{API}/repos/{repository(repo)}'
         self.token = token
-        self.client = client or httpx.Client(timeout=httpx.Timeout(120, connect=20), follow_redirects=False)
+        self.client = client or httpx.Client(timeout=httpx.Timeout(30, connect=15), follow_redirects=False)
         self.sleep = sleep
+        self.uploader = uploader
 
     def request(self, method, path, *, missing=False, **kwargs):
         # Token in a header only: never in a URL, redirect, log or CLI argument.
@@ -249,9 +255,7 @@ class Gitee:
                 continue
             try:
                 print(f'Uploading: {name} ({path.stat().st_size / 1024 / 1024:.1f} MiB)', flush=True)
-                with path.open('rb') as source:
-                    self.request('POST', f'/releases/{release_id}/attach_files',
-                                 files={'file': (name, UploadReader(source, name), 'application/octet-stream')})
+                self.uploader(f'{self.base}/releases/{release_id}/attach_files', self.token, path)
             except SyncError as error:
                 # Never blindly retry an upload: duplicate files can be created on Gitee.
                 if not self.find_verified(release_id, path):
@@ -283,7 +287,7 @@ def main():
             if args.dry_run:
                 message = f"仅验证：{meta['tagName']} 的三个平台、9 个附件通过校验；未写入 Gitee。"
             else:
-                with httpx.Client(timeout=httpx.Timeout(120, connect=20), follow_redirects=False) as client:
+                with httpx.Client(timeout=httpx.Timeout(30, connect=15), follow_redirects=False) as client:
                     uploaded, skipped = Gitee(target, os.environ['GITEE_TOKEN'], client=client).mirror(meta, commit, directory)
                 message = f"{meta['tagName']} 同步完成：上传 {uploaded}，已有且校验一致 {skipped}；发行说明一致。"
                 message += f'\n\n[Gitee 发行版](https://gitee.com/{target}/releases/tag/{meta["tagName"]})'
