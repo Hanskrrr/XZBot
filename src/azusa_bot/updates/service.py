@@ -116,6 +116,9 @@ class UpdateService:
         previous=github.repository(settings['feed_url'])
         if previous and previous.casefold()==gitee.repository(gitee.DEFAULT_SOURCE).casefold():
             settings['feed_url']=gitee.DEFAULT_SOURCE
+            self.write('settings.json',settings)
+            self.write('check.json',{})
+            self.write('pending.json',None)
         return settings
 
     def save(self,body):

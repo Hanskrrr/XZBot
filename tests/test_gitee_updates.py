@@ -72,7 +72,11 @@ def test_only_former_official_repository_migrates(tmp_path):
     service = UpdateService(tmp_path)
     former = 'https://api.github.com/repos/' + gitee.repository(gitee.DEFAULT_SOURCE) + '/releases'
     service.write('settings.json', DEFAULTS | {'feed_url': former})
+    service.write('pending.json', {'feed_url': former, 'release': {'version': '0.9.1'}})
+    service.write('check.json', {'feed_url': former})
     assert service.status()['settings']['feed_url'] == gitee.DEFAULT_SOURCE
+    assert service.status()['pending'] is None
+    assert service.status()['check'] == {}
     custom = 'https://api.github.com/repos/other/project/releases'
     service.save(DEFAULTS | {'feed_url': custom})
     assert service.status()['settings']['feed_url'] == custom
