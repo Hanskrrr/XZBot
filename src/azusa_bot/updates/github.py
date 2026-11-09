@@ -3,9 +3,6 @@ import json
 import re
 from urllib.parse import urlsplit
 
-DEFAULT_SOURCE = 'https://api.github.com/repos/Hanskrrr/XZBot/releases'
-
-
 def repository(url):
     match = re.fullmatch(r'https://api\.github\.com/repos/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/releases',url)
     return match.group(1) if match else None

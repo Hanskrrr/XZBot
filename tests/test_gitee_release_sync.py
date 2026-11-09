@@ -92,12 +92,14 @@ class Server:
 def test_complete_publish_and_idempotent_rerun(bundle):
     meta, directory = bundle
     server = Server(directory)
-    assert server.api().mirror(meta, COMMIT, directory) == (9, 0)
+    assert server.api().mirror(meta, COMMIT, directory) == (10, 0)
     assert server.release['body'] == meta['body']
     assert server.release['name'] == meta['name']
     assert server.release['prerelease'] is True
-    assert server.api().mirror(meta, COMMIT, directory) == (0, 9)
-    assert len(server.posts) == 9
+    assert server.posts[-1] == 'updates.json'
+    assert len(json.loads(server.files['updates.json'])['releases']) == 3
+    assert server.api().mirror(meta, COMMIT, directory) == (0, 10)
+    assert len(server.posts) == 10
     assert not any(r.method == 'DELETE' for r in server.requests)
 
 
@@ -106,8 +108,8 @@ def test_lost_ack_is_reconciled_without_duplicate_writes(bundle, fault):
     meta, directory = bundle
     server = Server(directory)
     setattr(server, fault, True)
-    assert server.api().mirror(meta, COMMIT, directory) == (9, 0)
-    assert len(server.posts) == len(set(server.posts)) == 9
+    assert server.api().mirror(meta, COMMIT, directory) == (10, 0)
+    assert len(server.posts) == len(set(server.posts)) == 10
     assert sum(r.method == 'POST' and r.url.path.endswith('/releases') for r in server.requests) == 1
 
 
@@ -119,11 +121,12 @@ def test_partial_upload_can_resume_and_notes_only_finalized_on_success(bundle):
         server.api().mirror(meta, COMMIT, directory)
     assert TOKEN not in str(error.value)
     assert server.release['body'].startswith(meta['body'])
-    assert '附件镜像尚未完成' in server.release['body']
-    assert server.release['body'].count('https://github.com/example/XZBot/releases/download/') == 3
+    assert '附件发布尚未完成' in server.release['body']
+    assert 'github.com' not in server.release['body']
+    assert 'updates.json' not in server.files
     server.fail_after = None
-    assert server.api().mirror(meta, COMMIT, directory) == (5, 4)
-    assert len(server.posts) == 9
+    assert server.api().mirror(meta, COMMIT, directory) == (6, 4)
+    assert len(server.posts) == 10
     assert server.release['body'] == meta['body']
 
 
@@ -285,8 +288,8 @@ def test_archives_run_concurrently_and_failure_waits_for_other_uploads(bundle):
     # Other workers finish before mirror() returns an error; successful uploads
     # are retained, and retrying only sends the one missing archive.
     assert len(server.files) == 8
-    assert '附件镜像尚未完成' in server.release['body']
-    assert server.api().mirror(meta, COMMIT, directory) == (1, 8)
+    assert '附件发布尚未完成' in server.release['body']
+    assert server.api().mirror(meta, COMMIT, directory) == (2, 8)
     assert server.release['body'] == meta['body']
 
 
@@ -302,10 +305,10 @@ def test_only_confirmed_incomplete_archive_is_retried_once(bundle):
             raise sync.IncompleteUpload('synthetic_incomplete_body')
         normal(url, token, path)
     api.uploader = upload
-    assert api.mirror(meta, COMMIT, directory) == (9, 0)
+    assert api.mirror(meta, COMMIT, directory) == (10, 0)
     assert attempts['XZBot-0.9.0rc6-macos-aarch64.zip'] == 2
     assert all(count == 1 for name, count in attempts.items() if not name.endswith('-macos-aarch64.zip'))
-    assert len(server.posts) == len(set(server.posts)) == 9
+    assert len(server.posts) == len(set(server.posts)) == 10
 
 
 def test_incomplete_upload_retry_is_bounded(bundle):
@@ -324,4 +327,4 @@ def test_incomplete_upload_retry_is_bounded(bundle):
         api.mirror(meta, COMMIT, directory)
     assert len(attempts) == 2
     assert len(server.files) == 8
-    assert '附件镜像尚未完成' in server.release['body']
+    assert '附件发布尚未完成' in server.release['body']

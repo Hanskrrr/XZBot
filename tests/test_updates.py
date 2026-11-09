@@ -147,8 +147,9 @@ def test_worker_applies_or_rolls_back_without_touching_qq_or_private_data(tmp_pa
 
 @pytest.mark.asyncio
 async def test_github_release_feed_selects_prerelease_and_checks_assets(tmp_path):
-    from azusa_bot.updates.github import DEFAULT_SOURCE
+    DEFAULT_SOURCE = 'https://api.github.com/repos/example/XZBot/releases'
     service=UpdateService(tmp_path)
+    service.save(DEFAULTS|{'feed_url':DEFAULT_SOURCE})
     archive,release,_=package(tmp_path)
     release['url']='XZBot-0.9.1.zip'
     rows=[{'tag_name':'v0.9.1','draft':False,'prerelease':False,'assets':[{'name':'updates.json'},{'name':release['url']}]}]
@@ -158,16 +159,16 @@ async def test_github_release_feed_selects_prerelease_and_checks_assets(tmp_path
         return json.dumps(rows if url==DEFAULT_SOURCE else {'schema':1,'releases':[release]}).encode()
     service.fetch=fetch
     status=await service.check()
-    assert status['check']['release']['url']=='https://github.com/Hanskrrr/XZBot/releases/download/v0.9.1/XZBot-0.9.1.zip'
+    assert status['check']['release']['url']=='https://github.com/example/XZBot/releases/download/v0.9.1/XZBot-0.9.1.zip'
     assert len(requests)==2
     release['url']='https://attacker.example/package.zip'
     with pytest.raises(ValueError,match='origin_mismatch'):await service.check()
 
 @pytest.mark.asyncio
 async def test_github_prerelease_optout_and_old_release_without_feed(tmp_path):
-    from azusa_bot.updates.github import DEFAULT_SOURCE
+    DEFAULT_SOURCE = 'https://api.github.com/repos/example/XZBot/releases'
     service=UpdateService(tmp_path)
-    service.save(DEFAULTS|{'include_prerelease':False})
+    service.save(DEFAULTS|{'include_prerelease':False,'feed_url':DEFAULT_SOURCE})
     async def fetch(url,limit):
         assert url==DEFAULT_SOURCE
         return json.dumps([{'tag_name':'v9.0.0-rc.1','prerelease':True,'assets':[{'name':'updates.json'}]},
@@ -202,10 +203,10 @@ async def test_github_download_redirect_boundary(monkeypatch,target,allowed):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('host,address,allowed',[
-    ('https://api.github.com/repos/Hanskrrr/XZBot/releases','198.18.0.90',True),
+    ('https://api.github.com/repos/example/XZBot/releases','198.18.0.90',True),
     ('https://downloads.example.test/updates.json','198.18.0.90',False),
-    ('https://api.github.com/repos/Hanskrrr/XZBot/releases','127.0.0.1',False),
-    ('https://api.github.com/repos/Hanskrrr/XZBot/releases','192.168.0.1',False),
+    ('https://api.github.com/repos/example/XZBot/releases','127.0.0.1',False),
+    ('https://api.github.com/repos/example/XZBot/releases','192.168.0.1',False),
 ])
 async def test_only_github_allows_tun_benchmark_dns(monkeypatch,host,address,allowed):
     import httpx
@@ -221,8 +222,8 @@ async def test_only_github_allows_tun_benchmark_dns(monkeypatch,host,address,all
         with pytest.raises(ValueError,match='public_host_required'):await mod.download(host,100)
 
 
-def test_named_official_source_keeps_github_updates_and_custom_switch_is_explicit(http):
-    from azusa_bot.updates.github import DEFAULT_SOURCE
+def test_named_official_source_uses_gitee_and_custom_switch_is_explicit(http):
+    from azusa_bot.updates.gitee import DEFAULT_SOURCE
     client,root,_,admin,_=http
     status=client.get('/admin/updates',headers=admin).json()
     assert status['source_kind']=='official'

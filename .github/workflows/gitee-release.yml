@@ -79,3 +79,8 @@ jobs:
           args=(--tag "$TAG")
           if [ "$DRY_RUN" = true ]; then args+=(--dry-run); fi
           uv run --no-project --python 3.12 --with httpx==0.28.1 python scripts/sync_gitee_release.py "${args[@]}"
+      - name: Explain incomplete publication
+        if: failure()
+        run: |
+          echo '### Gitee 发布未完成' >> "$GITHUB_STEP_SUMMARY"
+          echo '已校验的附件会保留。查看上一步的错误码后，可选择 Re-run failed jobs 补传；也可下载原生构建产物后在 Gitee 手动上传。更新清单只在三个安装包全部校验通过后发布。' >> "$GITHUB_STEP_SUMMARY"

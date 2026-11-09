@@ -115,16 +115,22 @@ def validate_packages(directory, meta, commit):
 
 
 def pending_notes(meta):
-    """Keep notes and real GitHub downloads usable while a mirror is incomplete."""
-    repo = repository(meta['_source_repo'])
-    tag = meta['tagName']
-    version = version_for(tag)
-    lines = [meta['body'] or '', '\n---\n### 附件镜像尚未完成',
-             'Gitee 安装包尚未全部上传并校验完成。以下为 GitHub 原始安装包备用下载；不是已完成的 Gitee 镜像：']
-    for platform, arch in PLATFORMS.items():
-        name = f'XZBot-{version}-{platform}-{arch}.zip'
-        lines.append(f'- [{platform} / {arch}](https://github.com/{repo}/releases/download/{tag}/{name})')
+    """An incomplete public release must not advertise missing installers."""
+    lines = [meta['body'] or '', '\n---\n### 附件发布尚未完成',
+             '安装包尚未全部上传并校验完成，请使用本项目上一个完整发行版，或等待本次发布完成。']
     return '\n'.join(lines)
+
+
+def write_update_feed(directory, meta):
+    releases = []
+    for name in sorted(expected_names(version_for(meta['tagName']))):
+        if name.endswith('.verification.json'):
+            report = json.loads((directory / name).read_text())
+            releases.append({key: report[key] for key in ('version', 'platform', 'arch', 'commit')} |
+                            {'sha256': report['zip_sha256'], 'url': name.replace('.verification.json', '.zip')})
+    path = directory / 'updates.json'
+    path.write_text(json.dumps({'schema': 1, 'releases': releases}, indent=2) + '\n')
+    return path
 
 
 def curl_upload(url, token, path):
@@ -329,9 +335,12 @@ class Gitee:
             results.extend(completed)
         if failed:
             raise failed[0][1]
+        # This is the updater's completion marker: publish only after all nine
+        # installer/checksum/report files have been downloaded and verified.
+        results.append(ensure_asset(write_update_feed(directory, meta)))
         uploaded = sum(result[0] for result in results)
         skipped = sum(result[1] for result in results)
-        # Only promote the release and its actual notes after all 9 files are verified.
+        # Only promote after all packages and the update feed are verified.
         self.request('PATCH', f'/releases/{release_id}', data=fields)
         final = self.request('GET', f'/releases/tags/{tag}')
         require(all(final.get(k) == v for k, v in fields.items() if k != 'prerelease')

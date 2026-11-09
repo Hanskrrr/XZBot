@@ -71,7 +71,7 @@ def main(root):
     with (service.directory/'install.lock').open('a') as lock:
         file_locks.flock(lock,file_locks.LOCK_EX|file_locks.LOCK_NB)
         pending=service.read('pending.json',None)
-        if not pending or pending['feed_url']!=(DEFAULTS|service.read('settings.json',{}))['feed_url']:
+        if not pending or pending['feed_url']!=service.configuration()['feed_url']:
             raise ValueError('update_source_changed')
         validate(service.directory/'pending.zip',pending['release'])
         # Let the HTTP acknowledgement leave before stopping its own server.

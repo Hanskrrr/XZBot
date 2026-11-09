@@ -32,7 +32,7 @@ jobs:
         shell: bash
         run: |
           if [ "$RUNNER_OS" = Windows ]; then PY=.venv/Scripts/python.exe; else PY=.venv/bin/python; fi
-          "$PY" -m pytest -q tests/test_native_host.py tests/test_updates.py tests/test_recent_situation.py tests/test_starter_profiles.py tests/test_prompt_defaults.py tests/test_manual_idle.py tests/test_group_idle.py tests/test_reply_contract.py tests/test_request_context.py tests/test_group_followup.py
+          "$PY" -m pytest -q tests/test_native_host.py tests/test_updates.py tests/test_gitee_updates.py tests/test_recent_situation.py tests/test_starter_profiles.py tests/test_prompt_defaults.py tests/test_manual_idle.py tests/test_group_idle.py tests/test_reply_contract.py tests/test_request_context.py tests/test_group_followup.py
       - name: Native quoted-message bridge tests
         shell: bash
         run: |

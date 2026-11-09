@@ -1,6 +1,6 @@
 # Mac 与服务器同步开发
 
-远程：`git@github.com:Hanskrrr/XZBot.git`。使用同一份源码，平台差异放在宿主适配模块中；不要维护互不合并的 Mac / Linux 永久副本。
+远程：`https://gitee.com/hanskrrr/XZBot.git`。使用同一份源码，平台差异放在宿主适配模块中；不要维护互不合并的 Mac / Linux 永久副本。
 
 ## 日常流程
 
@@ -17,7 +17,7 @@ git commit -m "Add Linux host lifecycle adapter"
 git push -u origin linux-support
 ```
 
-在 GitHub 提交 PR、检查变更并合并，再让另一台机器更新 main。运行目录有未提交改动时，先保存成自己的分支/提交；不要使用强制拉取、`reset --hard`、`clean -fdx` 或整目录覆盖。代码更新不等于自动重启已运行进程；更新依赖与数据库之前先备份，验证后只重载相关服务。
+在 Gitee 提交 PR、检查变更并合并，再让另一台机器更新 main。运行目录有未提交改动时，先保存成自己的分支/提交；不要使用强制拉取、`reset --hard`、`clean -fdx` 或整目录覆盖。代码更新不等于自动重启已运行进程；更新依赖与数据库之前先备份，验证后只重载相关服务。
 
 首次 clone 后安装本地钩子：`.venv/bin/python scripts/install_git_hooks.py`。Git 不会自动启用 clone 下来的 hooks；两边都需要执行一次。已有其他 hooks 配置时安装器会拒绝覆盖。
 
@@ -33,6 +33,6 @@ git push -u origin linux-support
 
 本次代码发布以远程初始化提交为基础，不包含旧的本机私人 Git 历史。旧历史只保存在本机忽略的备份目录中；不要把该 bundle 或旧分支推上远程。
 
-## GitHub → Gitee 发行版
+## 发行版与源码
 
-代码镜像和发行版附件是两条同步链路。已配置的 Gitee 镜像负责分支、提交与标签；仓库的 `Sync Gitee release` 工作流负责三端安装包、校验文件、验证报告及发行说明。只需一次配置 `GITEE_TOKEN` Secret；参见[源码构建手册](source-build.md#自动同步-release一次配置)。这项同步不包含本机 API key、QQ 登录缓存、聊天与记忆数据。
+用户从本项目 Gitee 发行版下载三端安装包，程序的“官方更新源”也从这里读取完整发行版。维护者可以使用自动发布流水线或手动上传已验证的包，参见[源码构建手册](source-build.md#发布与更新清单)。源码更新和安装包发布分别完成；这两条流程都不包含本机 API key、QQ 登录缓存、聊天与记忆数据。

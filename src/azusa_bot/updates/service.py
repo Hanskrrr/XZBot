@@ -18,9 +18,9 @@ from ..settings import private_write
 from ..runtime_layout import runtime_layout
 from ..host import protect
 from .archive import validate
-from . import github
+from . import github, gitee
 
-DEFAULTS={'feed_url':github.DEFAULT_SOURCE,'auto_check':True,'auto_download':False,'include_prerelease':True}
+DEFAULTS={'feed_url':gitee.DEFAULT_SOURCE,'auto_check':True,'auto_download':False,'include_prerelease':True}
 
 
 def version(value):
@@ -47,26 +47,28 @@ def https_url(value):
 async def download(url, limit):
     https_url(url)
     github_asset=github.asset_url(url)
-    github_provider=github_asset or github.repository(url) is not None
-    # GitHub signs release-asset CDN URLs. Only this explicit provider can
-    # redirect, only to its exact public asset hosts, never with credentials.
+    gitee_asset=gitee.asset_url(url)
+    public_provider=github_asset or github.repository(url) is not None or gitee_asset or gitee.repository(url) is not None
+    # Built-in release providers may redirect to their public asset CDNs.
+    # No credentials are read or forwarded, and arbitrary hosts remain blocked.
     async with httpx.AsyncClient(timeout=60,follow_redirects=False,trust_env=False) as client:
         for attempt in range(3):
             addresses=await asyncio.get_running_loop().run_in_executor(None,lambda:socket.getaddrinfo(urlsplit(url).hostname,443,type=socket.SOCK_STREAM))
             # Local TUN proxies commonly map DNS to the benchmarking range.
-            # Permit that range ONLY for the fixed GitHub provider/asset hosts;
+            # Permit that range ONLY for the fixed release provider/asset hosts;
             # HTTPS certificate/hostname validation remains mandatory. Custom
             # feeds and other private, loopback or link-local addresses fail.
             def accepted(address):
                 value=ipaddress.ip_address(address)
-                return value.is_global or (github_provider and value.version==4
+                return value.is_global or (public_provider and value.version==4
                     and value in ipaddress.ip_network('198.18.0.0/15'))
             if not addresses or any(not accepted(a[4][0]) for a in addresses):
                 raise ValueError('update_public_host_required')
             async with client.stream('GET',url,headers={'User-Agent':'XZBot-updater/1'}) as response:
                 if response.status_code in {301,302,303,307,308}:
                     target=urljoin(url,response.headers.get('location',''))
-                    if not github_asset or not github.redirect_allowed(target):raise ValueError('update_asset_origin_mismatch')
+                    if not ((github_asset and github.redirect_allowed(target)) or
+                            (gitee_asset and gitee.redirect_allowed(target))):raise ValueError('update_asset_origin_mismatch')
                     url=target;continue
                 if response.status_code!=200:raise ValueError('update_download_failed')
                 chunks=[];size=0
@@ -101,12 +103,20 @@ class UpdateService:
                 and (self.root/'RELEASE-INFO.json').is_file() and (self.root/'RELEASE-FILES.json').is_file())
 
     def status(self):
-        settings=DEFAULTS|self.read('settings.json',{})
+        settings=self.configuration()
         return {'current_version':__version__,'supported':self.supported(),
                 'reason':('manager_only' if self.layout.is_managed else 'source_checkout' if (self.root/'.git').exists() else 'release_manifest_required') if not self.supported() else '',
-                'settings':settings,'source_kind':'official' if settings['feed_url']==github.DEFAULT_SOURCE else 'custom',
+                'settings':settings,'source_kind':'official' if settings['feed_url']==gitee.DEFAULT_SOURCE else 'custom',
                 'check':self.read('check.json',{}),
                 'pending':self.read('pending.json',None),'operation':self.read('operation.json',{}),'error':self.error}
+
+    def configuration(self):
+        settings=DEFAULTS|self.read('settings.json',{})
+        # Migrate only the former built-in repository, preserving custom feeds.
+        previous=github.repository(settings['feed_url'])
+        if previous and previous.casefold()==gitee.repository(gitee.DEFAULT_SOURCE).casefold():
+            settings['feed_url']=gitee.DEFAULT_SOURCE
+        return settings
 
     def save(self,body):
         if isinstance(body,dict) and 'source_kind' in body:
@@ -117,24 +127,26 @@ class UpdateService:
             # needs to be rendered in its address input or sent back by it.
             if source=='official':
                 if body.get('feed_url')!='':raise ValueError('update_settings_invalid')
-                body['feed_url']=github.DEFAULT_SOURCE
+                body['feed_url']=gitee.DEFAULT_SOURCE
         if not isinstance(body,dict) or set(body)!=set(DEFAULTS) or any(type(body[k]) is not bool for k in DEFAULTS if k!='feed_url'):
             raise ValueError('update_settings_invalid')
         if not isinstance(body['feed_url'],str) or len(body['feed_url'])>600:raise ValueError('update_settings_invalid')
         if body['feed_url']:https_url(body['feed_url'])
         if body['auto_download'] and not body['auto_check']:raise ValueError('update_auto_check_required')
-        old=DEFAULTS|self.read('settings.json',{})
+        old=self.configuration()
         self.write('settings.json',body)
         if old['feed_url']!=body['feed_url']:
             self.write('check.json',{});self.write('pending.json',None)
         return self.status()
 
     async def check(self):
-        cfg=DEFAULTS|self.read('settings.json',{})
+        cfg=self.configuration()
         if not cfg['feed_url']:raise ValueError('update_source_not_configured')
         base=cfg['feed_url']
         if github.repository(base):
             feed,base=await github.resolve(base,self.fetch,include_prerelease=cfg['include_prerelease'],version=version)
+        elif gitee.repository(base):
+            feed,base=await gitee.resolve(base,self.fetch,include_prerelease=cfg['include_prerelease'],version=version)
         else:
             feed=json.loads(await self.fetch(base,1024*1024))
         if not isinstance(feed,dict) or feed.get('schema')!=1 or not isinstance(feed.get('releases'),list) or len(feed['releases'])>100:
@@ -175,7 +187,7 @@ class UpdateService:
         if not self.supported():raise ValueError('update_release_installation_required')
         pending=self.read('pending.json',None)
         if not pending:raise ValueError('update_not_prepared')
-        if pending['feed_url']!=(DEFAULTS|self.read('settings.json',{}))['feed_url']:raise ValueError('update_source_changed')
+        if pending['feed_url']!=self.configuration()['feed_url']:raise ValueError('update_source_changed')
         validate(self.directory/'pending.zip',pending['release'])
         state=self.read('operation.json',{})
         if state.get('state') in {'starting','installing'} and time.time()-state.get('at',0)<900:raise ValueError('update_busy')
@@ -190,7 +202,7 @@ class UpdateService:
     async def run(self):
         while True:
             await asyncio.sleep(60)
-            cfg=DEFAULTS|self.read('settings.json',{})
+            cfg=self.configuration()
             if not self.supported() or not cfg['auto_check'] or not cfg['feed_url']:continue
             if time.time()-self.read('check.json',{}).get('checked_at',0)<21600:continue
             try:

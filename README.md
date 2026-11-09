@@ -18,14 +18,14 @@
 
 ## 下载与手册
 
-[三端 Release 下载](https://github.com/Hanskrrr/XZBot/releases) · [简明操作手册](docs/user-guide.md) · [三端部署](docs/releases.md) · [源码安装与手动构建](docs/source-build.md)
+[Windows / macOS / Linux 下载](https://gitee.com/hanskrrr/XZBot/releases) · [简明操作手册](docs/user-guide.md) · [三端部署](docs/releases.md) · [源码安装与手动构建](docs/source-build.md)
 
 ## 快速开始
 
 需要 Python 3.12、[uv](https://docs.astral.sh/uv/) 和 Git。首先仅启动本机管理核心：
 
 ```sh
-git clone git@github.com:Hanskrrr/XZBot.git
+git clone https://gitee.com/hanskrrr/XZBot.git
 cd XZBot
 sh scripts/setup.sh
 .venv/bin/python scripts/install_git_hooks.py
@@ -38,7 +38,7 @@ AZUSA_ROOT="$PWD" .venv/bin/python -m azusa_bot.cli serve
 
 ## 下载发行版
 
-在 [GitHub Releases](https://github.com/Hanskrrr/XZBot/releases) 下载对应平台的 ZIP，解压后双击或运行 Start-XZBot。首次需要网络安装 Python 和固定依赖；不包含个人 key 或 QQ 登录状态。
+在 [发行版下载页](https://gitee.com/hanskrrr/XZBot/releases) 下载对应平台的 ZIP，解压后双击或运行 Start-XZBot。首次需要网络安装 Python 和固定依赖；不包含个人 key 或 QQ 登录状态。新版本内置的“官方更新源”从本项目 Gitee 发行版查找、下载更新，无需下载者的账户或令牌。
 
 新安装自带阿梓与灰泽满两个同人角色 Profile，含人设、提示词默认版本、预设问答、别名、基础背景资料和音色 ID。语音授权与使用开关默认关闭，下载者需自行确认使用权限。已有部署在「角色档案」从模板新建副本，不覆盖自己的资料。第三方资料保留来源与各自许可，不统一按代码的 MIT 许可重授权。
 
