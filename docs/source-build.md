@@ -73,4 +73,20 @@ python scripts/build_update_feed.py dist/release
 
 镜像同步分支、标签和提交，不会执行 GitHub Actions，也不复制 Release 附件。Gitee 可以建立相同标签的发行版并上传三个已验证 ZIP、校验文件和报告，无需重新构建；当前官方说明的普通仓库单附件上限为 100MB。也可在 Gitee 发行说明链接到 GitHub 下载。[官方发行版说明](https://help.gitee.com/repository/release/create)
 
-当前程序默认更新源仍是 GitHub。Gitee 的仓库主页不是更新清单，不能直接填进更新框；如果另建静态下载站，要将清单和 ZIP 同源托管。不要把任何账号密钥写进工作流；将来启用自动上传 Gitee 时应通过仓库 Secret 配置独立发布凭据。
+### 自动同步 Release（一次配置）
+
+仓库已提供 **Sync Gitee release** 工作流。三端构建、验证及 GitHub 发布成功后会直接调用它；手工发布或修改 GitHub 发行说明也会触发。不能只依赖 `release` 事件：由 GitHub 内置 `GITHUB_TOKEN` 创建的发行版不会再次触发普通 Release 工作流。
+
+1. 在 Gitee「设置 → 私人令牌」创建仅含仓库所需 **projects** 权限的令牌。令牌所属账号需要能发布目标仓库的 Release；不要放入聊天、源码、普通 Actions Variable 或 Bot 配置。
+2. 在 GitHub 仓库「Settings → Secrets and variables → Actions → New repository secret」添加 **`GITEE_TOKEN`**。过期或撤销后在这里替换即可，读者下载不需要此令牌。
+3. 默认同步到 GitHub 同名的 Gitee 仓库（用户名转小写）。不同路径时，添加 Actions **Variable** `GITEE_REPOSITORY`，值为 `用户名/仓库名`。这不是 Secret。
+4. 首次补同步：打开 GitHub「Actions → Sync Gitee release → Run workflow」，选择 `main`，填写已有标签，例如 `v0.9.0-rc.6`；留空选最近发布的版本，包含候选版。勾选 `dry_run` 只校验 GitHub 附件，不上传、也不需要 Gitee 令牌。
+5. 查看这次运行的 Summary：显示上传数量、已存在且校验一致的数量与 Gitee 发行版链接。未配置令牌时明确显示“同步尚未启用”，不会把 GitHub 发布判失败，也不代表已经同步。
+
+每个版本复制 **3 个安装 ZIP + 3 个 SHA256 文件 + 3 个原生验证报告**，并复制标题、完整发行说明和候选版状态。`updates.json` 不复制，程序“官方更新源”继续使用 GitHub；Gitee 下载镜像与程序自动更新是独立的。
+
+上传前验证三端包的哈希、原生验证报告及 GitHub 标签提交；最多等待约 6 分钟，让 Gitee 的代码镜像追上同一标签提交。上传后重新下载 Gitee 附件计算哈希；全部成功后才写入最终发行说明。在此之前新发行版标为候选版并说明“附件正在同步”。
+
+重复运行只补缺少的附件，同名且哈希相同则跳过；同名内容不同、重复附件或标签长期未同步会明确失败，不自动覆盖、删除文件或改写标签。上传回执丢失时先查询实际附件，避免重复上传。修复原因后对原运行选择 **Re-run failed jobs**，或按第 4 步补同步即可。镜像账户容量满时需要维护者自行处理；工作流不会自动清理旧版。
+
+如果 Gitee 发布失败，GitHub 上已发布的版本仍可下载。Gitee 的仓库主页不是更新清单，不能直接填进更新框。脚本使用 [Gitee v5 官方 Release/附件接口](https://gitee.com/api/v5/swagger)，发布凭据仅通过 Secret 注入。

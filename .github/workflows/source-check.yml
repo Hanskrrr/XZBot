@@ -9,3 +9,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check published tree
         run: python3 scripts/check_repository.py --ref HEAD
+  release-sync-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.8'
+      - name: Test release mirror without credentials or network
+        env:
+          PYTHONPATH: src
+        run: uv run --no-project --python 3.12 --with httpx==0.28.1 --with pytest==9.2.0 --with pytest-asyncio==1.4.1.post1 python -m pytest -q tests/test_gitee_release_sync.py
