@@ -29,7 +29,7 @@ uv run --no-project --python 3.12 scripts/install_release.py --no-open
 
 必须分别在 Windows x64、Apple Silicon macOS、Linux x64 上构建。`--platform` 只是目标确认参数，不是交叉编译；不能在 Mac 上改成 windows 就声称得到 Windows 可用包。
 
-1. 使用干净、已提交的源码树。检查版本号与拟发布标签一致，例如 `0.9.0rc4` 对应 `v0.9.0-rc.4`。
+1. 使用干净、已提交的源码树。检查版本号与拟发布标签一致，例如 `0.9.0rc5` 对应 `v0.9.0-rc.5`。
 2. 执行上述完整安装；确认 `uv --version` 是 0.11.8。
 3. 准备 uv 的两份许可证。macOS / Linux：
 

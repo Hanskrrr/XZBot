@@ -73,7 +73,7 @@ CI 不登录 QQ，也不使用任何真实模型密钥。Mac 现有 QQ 环境可
 可选 Gemini Balance 仍需目标平台安装其 Git 和依赖；发布测试不等于已经验证它在每个系统上运行。
 
 
-## RC4：GitHub 更新与自定义下载源
+## RC4 / RC5：GitHub 更新与自定义下载源
 
 管理页「更新与备份 → 版本更新」默认使用 `https://api.github.com/repos/Hanskrrr/XZBot/releases`，无需 GitHub 密钥；可每 6 小时检查，并可选择自动下载。也支持自定义可信 HTTPS `updates.json`。安装由管理员点“安装并重启 XZBot”触发，不在聊天中静默重启。首次从 RC3 升级到带此功能的版本仍需手动更新一次；RC3 本身没有更新器和程序文件清单。
 

@@ -199,3 +199,23 @@ async def test_github_download_redirect_boundary(monkeypatch,target,allowed):
         with pytest.raises(ValueError,match='origin_mismatch'):
             await mod.download('https://github.com/example/XZBot/releases/download/v1/file.zip',100)
         assert len(requested)==1
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('host,address,allowed',[
+    ('https://api.github.com/repos/Hanskrrr/XZBot/releases','198.18.0.90',True),
+    ('https://downloads.example.test/updates.json','198.18.0.90',False),
+    ('https://api.github.com/repos/Hanskrrr/XZBot/releases','127.0.0.1',False),
+    ('https://api.github.com/repos/Hanskrrr/XZBot/releases','192.168.0.1',False),
+])
+async def test_only_github_allows_tun_benchmark_dns(monkeypatch,host,address,allowed):
+    import httpx
+    import azusa_bot.updates.service as mod
+    real_client=httpx.AsyncClient
+    def client(**kw):
+        assert 'verify' not in kw or kw['verify'] is True
+        return real_client(transport=httpx.MockTransport(lambda r:httpx.Response(200,content=b'[]')),**kw)
+    monkeypatch.setattr(mod.httpx,'AsyncClient',client)
+    monkeypatch.setattr(mod.socket,'getaddrinfo',lambda *a,**kw:[(2,1,6,'',(address,443))])
+    if allowed:assert await mod.download(host,100)==b'[]'
+    else:
+        with pytest.raises(ValueError,match='public_host_required'):await mod.download(host,100)

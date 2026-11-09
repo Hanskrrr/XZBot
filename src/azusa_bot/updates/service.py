@@ -47,12 +47,21 @@ def https_url(value):
 async def download(url, limit):
     https_url(url)
     github_asset=github.asset_url(url)
+    github_provider=github_asset or github.repository(url) is not None
     # GitHub signs release-asset CDN URLs. Only this explicit provider can
     # redirect, only to its exact public asset hosts, never with credentials.
     async with httpx.AsyncClient(timeout=60,follow_redirects=False,trust_env=False) as client:
         for attempt in range(3):
             addresses=await asyncio.get_running_loop().run_in_executor(None,lambda:socket.getaddrinfo(urlsplit(url).hostname,443,type=socket.SOCK_STREAM))
-            if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
+            # Local TUN proxies commonly map DNS to the benchmarking range.
+            # Permit that range ONLY for the fixed GitHub provider/asset hosts;
+            # HTTPS certificate/hostname validation remains mandatory. Custom
+            # feeds and other private, loopback or link-local addresses fail.
+            def accepted(address):
+                value=ipaddress.ip_address(address)
+                return value.is_global or (github_provider and value.version==4
+                    and value in ipaddress.ip_network('198.18.0.0/15'))
+            if not addresses or any(not accepted(a[4][0]) for a in addresses):
                 raise ValueError('update_public_host_required')
             async with client.stream('GET',url,headers={'User-Agent':'XZBot-updater/1'}) as response:
                 if response.status_code in {301,302,303,307,308}:
