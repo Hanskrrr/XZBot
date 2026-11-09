@@ -101,12 +101,23 @@ class UpdateService:
                 and (self.root/'RELEASE-INFO.json').is_file() and (self.root/'RELEASE-FILES.json').is_file())
 
     def status(self):
+        settings=DEFAULTS|self.read('settings.json',{})
         return {'current_version':__version__,'supported':self.supported(),
                 'reason':('manager_only' if self.layout.is_managed else 'source_checkout' if (self.root/'.git').exists() else 'release_manifest_required') if not self.supported() else '',
-                'settings':DEFAULTS|self.read('settings.json',{}),'check':self.read('check.json',{}),
+                'settings':settings,'source_kind':'official' if settings['feed_url']==github.DEFAULT_SOURCE else 'custom',
+                'check':self.read('check.json',{}),
                 'pending':self.read('pending.json',None),'operation':self.read('operation.json',{}),'error':self.error}
 
     def save(self,body):
+        if isinstance(body,dict) and 'source_kind' in body:
+            source=body['source_kind']
+            if source not in ('official','custom'):raise ValueError('update_settings_invalid')
+            body={k:v for k,v in body.items() if k!='source_kind'}
+            # The UI selects the built-in source by name; no repository URL
+            # needs to be rendered in its address input or sent back by it.
+            if source=='official':
+                if body.get('feed_url')!='':raise ValueError('update_settings_invalid')
+                body['feed_url']=github.DEFAULT_SOURCE
         if not isinstance(body,dict) or set(body)!=set(DEFAULTS) or any(type(body[k]) is not bool for k in DEFAULTS if k!='feed_url'):
             raise ValueError('update_settings_invalid')
         if not isinstance(body['feed_url'],str) or len(body['feed_url'])>600:raise ValueError('update_settings_invalid')

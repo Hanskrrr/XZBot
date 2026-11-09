@@ -219,3 +219,24 @@ async def test_only_github_allows_tun_benchmark_dns(monkeypatch,host,address,all
     if allowed:assert await mod.download(host,100)==b'[]'
     else:
         with pytest.raises(ValueError,match='public_host_required'):await mod.download(host,100)
+
+
+def test_named_official_source_keeps_github_updates_and_custom_switch_is_explicit(http):
+    from azusa_bot.updates.github import DEFAULT_SOURCE
+    client,root,_,admin,_=http
+    status=client.get('/admin/updates',headers=admin).json()
+    assert status['source_kind']=='official'
+    body=DEFAULTS|{'source_kind':'official','feed_url':'','auto_check':False}
+    response=client.put('/admin/updates',headers=admin,json=body)
+    assert response.status_code==200 and response.json()['source_kind']=='official'
+    stored=json.loads((root/'data/updates/settings.json').read_text())
+    assert stored['feed_url']==DEFAULT_SOURCE and stored['auto_check'] is False
+    custom='https://downloads.example.test/updates.json'
+    changed=client.put('/admin/updates',headers=admin,json=body|{'source_kind':'custom','feed_url':custom})
+    assert changed.status_code==200 and changed.json()['source_kind']=='custom'
+    assert changed.json()['settings']['feed_url']==custom
+    invalid=client.put('/admin/updates',headers=admin,json=body|{'feed_url':custom})
+    assert invalid.status_code==400
+    assert json.loads((root/'data/updates/settings.json').read_text())['feed_url']==custom
+    restored=client.put('/admin/updates',headers=admin,json=body)
+    assert restored.status_code==200 and restored.json()['settings']['feed_url']==DEFAULT_SOURCE

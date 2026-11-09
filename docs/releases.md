@@ -73,9 +73,9 @@ CI 不登录 QQ，也不使用任何真实模型密钥。Mac 现有 QQ 环境可
 可选 Gemini Balance 仍需目标平台安装其 Git 和依赖；发布测试不等于已经验证它在每个系统上运行。
 
 
-## RC4 / RC5：GitHub 更新与自定义下载源
+## 官方更新源与自定义下载源
 
-管理页「更新与备份 → 版本更新」默认使用 `https://api.github.com/repos/Hanskrrr/XZBot/releases`，无需 GitHub 密钥；可每 6 小时检查，并可选择自动下载。也支持自定义可信 HTTPS `updates.json`。安装由管理员点“安装并重启 XZBot”触发，不在聊天中静默重启。首次从 RC3 升级到带此功能的版本仍需手动更新一次；RC3 本身没有更新器和程序文件清单。
+管理页「更新与备份 → 版本更新」默认选择“官方更新源”，后台使用 GitHub Releases，无需填写地址或 GitHub 密钥；可每 6 小时检查，并可选择自动下载。也支持自定义可信 HTTPS `updates.json`。安装由管理员点“安装并重启 XZBot”触发，不在聊天中静默重启。首次从 RC3 升级到带此功能的版本仍需手动更新一次；RC3 本身没有更新器和程序文件清单。
 
 发行包包含 `RELEASE-FILES.json`。更新前校验整包 SHA256、平台、架构、版本、提交号、内部文件清单及本地代码是否被修改。只允许替换公开程序文件，拒绝写 data/content/accounts/config/local.json 等私有路径、符号链接、Windows 特殊路径及 Git 开发目录。安装期间持有各账号启动锁，验证 PID 命令行与工作目录后只停止 XZBot 核心和 AstrBot 桥接，不停止 QQ/NapCat/SnowLuma/虚拟机。保留原先运行的实例列表；只恢复那些实例。
 
