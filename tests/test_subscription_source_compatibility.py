@@ -132,6 +132,11 @@ def test_weibo_relative_and_calendar_dates_keep_china_timezone():
     assert _weibo_time("12-31 23:58", now) == now-7*60
     assert _weibo_time("2025-12-31 23:58", now) == now-7*60
     assert _weibo_time("12-31", now) == int(datetime(2025, 12, 31, tzinfo=local.tzinfo).timestamp())
+    # Year-less leap days belong to the latest leap year, never to year 1900.
+    leap = datetime(2028, 2, 29, 21, 0, tzinfo=local.tzinfo)
+    assert _weibo_time("02-29 20:30", leap.timestamp()) == int(leap.replace(minute=30, hour=20).timestamp())
+    after = datetime(2029, 1, 5, tzinfo=local.tzinfo).timestamp()
+    assert _weibo_time("02-29", after) == int(datetime(2028, 2, 29, tzinfo=local.tzinfo).timestamp())
     for invalid in ("昨天 25:00", "今天 00:99", "时间未知"):
         with pytest.raises(ValueError):
             _weibo_time(invalid, now)
