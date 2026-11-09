@@ -33,9 +33,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   sync:
-    # Hosted macOS uses a different network path than Azure Ubuntu; compare
-    # real attachment transfers when the latter is throttled cross-region.
-    runs-on: macos-15
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - name: Check publishing credential
@@ -61,6 +59,13 @@ jobs:
         if: steps.config.outputs.enabled == 'true'
         with:
           version: '0.11.8'
+      - name: Use conservative packet sizes for the upload path
+        if: steps.config.outputs.enabled == 'true'
+        run: |
+          GITEE_NET_DEV="$(ip -o route show default | awk 'NR==1 {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')"
+          test -n "$GITEE_NET_DEV"
+          sudo ip link set dev "$GITEE_NET_DEV" mtu 1280
+          sudo sysctl -w net.ipv4.tcp_mtu_probing=1
       - name: Verify source packages and mirror release
         if: steps.config.outputs.enabled == 'true'
         env:

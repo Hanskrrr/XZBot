@@ -18,7 +18,7 @@ TOKEN = 'unit-test-only-publishing-credential'
 @pytest.fixture
 def bundle(tmp_path):
     meta = {'tagName': 'v0.9.0-rc.6', 'name': 'XZBot 候选版', 'body': '## 新功能\n三端安装包与说明。\n',
-            'isDraft': False, 'isPrerelease': True}
+            'isDraft': False, 'isPrerelease': True, '_source_repo': 'example/XZBot'}
     for platform, arch in sync.PLATFORMS.items():
         base = f'XZBot-0.9.0rc6-{platform}-{arch}'
         data = ('verified test artifact: ' + platform).encode()
@@ -118,7 +118,9 @@ def test_partial_upload_can_resume_and_notes_only_finalized_on_success(bundle):
     with pytest.raises(sync.SyncError, match='gitee_http_503') as error:
         server.api().mirror(meta, COMMIT, directory)
     assert TOKEN not in str(error.value)
-    assert server.release['body'] != meta['body']
+    assert server.release['body'].startswith(meta['body'])
+    assert '附件镜像尚未完成' in server.release['body']
+    assert server.release['body'].count('https://github.com/example/XZBot/releases/download/') == 3
     server.fail_after = None
     assert server.api().mirror(meta, COMMIT, directory) == (5, 4)
     assert len(server.posts) == 9

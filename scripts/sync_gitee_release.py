@@ -77,6 +77,7 @@ def download_source(repo, tag, directory):
     print(f'Downloading verified GitHub release: {tag}', flush=True)
     gh('release', 'download', tag, '--repo', repo, '--dir', str(directory), *patterns)
     validate_packages(directory, meta, commit)
+    meta['_source_repo'] = repo
     return meta, commit
 
 
@@ -106,6 +107,19 @@ def validate_packages(directory, meta, commit):
                     {'version': version, 'platform': platform, 'arch': arch, 'commit': commit}.items()),
                 'source_report_mismatch')
         require(all(report.get(k) == 'passed' for k in CHECKS), 'source_verification_not_passed')
+
+
+def pending_notes(meta):
+    """Keep notes and real GitHub downloads usable while a mirror is incomplete."""
+    repo = repository(meta['_source_repo'])
+    tag = meta['tagName']
+    version = version_for(tag)
+    lines = [meta['body'] or '', '\n---\n### 附件镜像尚未完成',
+             'Gitee 安装包尚未全部上传并校验完成。以下为 GitHub 原始安装包备用下载；不是已完成的 Gitee 镜像：']
+    for platform, arch in PLATFORMS.items():
+        name = f'XZBot-{version}-{platform}-{arch}.zip'
+        lines.append(f'- [{platform} / {arch}](https://github.com/{repo}/releases/download/{tag}/{name})')
+    return '\n'.join(lines)
 
 
 def curl_upload(url, token, path):
@@ -248,7 +262,7 @@ class Gitee:
         release = self.request('GET', f'/releases/tags/{tag}', missing=True)
         if not release:
             pending = dict(fields, target_commitish=commit, prerelease='true',
-                           body='附件正在同步；完成前请使用 GitHub 上的已验证发行版。')
+                           body=pending_notes(meta))
             try:
                 release = self.request('POST', '/releases', data=pending)
             except SyncError:
@@ -257,6 +271,11 @@ class Gitee:
                 require(release is not None, 'gitee_release_creation_uncertain_rerun')
         release_id = release['id']
         require(isinstance(release_id, int), 'gitee_invalid_release_id')
+        # An interrupted mirror must not leave a blank or misleading release.
+        existing_names = {a['name'] for a in self.attachments(release_id)}
+        if set(expected_names(version_for(tag))) - existing_names:
+            self.request('PATCH', f'/releases/{release_id}',
+                         data=dict(fields, body=pending_notes(meta), prerelease='true'))
         uploaded = skipped = 0
         paths = [directory / name for name in expected_names(version_for(tag))]
         # Check small metadata uploads before spending time on native binaries.
