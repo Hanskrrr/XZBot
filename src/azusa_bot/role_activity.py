@@ -9,12 +9,46 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
 from .group_chat import GroupConversation
 
 TYPES={'bilibili_live','bilibili_dynamic','bilibili_video','weibo'}
 DAY=86400
+
+
+def _upgrade_archive_headers(root):
+    """Remove old generated instructions, preserving source text and identity.
+
+    Only exact legacy header/footer fields in generated activity documents are
+    replaced. Edited wording and unrelated/manual documents stay untouched.
+    Content-addressed old blobs remain available to historical trace references.
+    """
+    from . import lore
+    store=lore._store(root);changed=0
+    with store.locked():
+        with store.db() as db:
+            store.sync(db)
+            records=[json.loads(r[0]) for r in db.execute('SELECT metadata FROM documents')]
+        for record in records:
+            kind=record.get('activity_source','').split(':',1)[0]
+            if kind not in TYPES or not re.fullmatch(r'activity-[a-f0-9]{64}\.md',record.get('name','')):continue
+            raw=store.text(record);lines=raw.split('\n')
+            if (kind=='bilibili_video' and len(lines)==5 and lines[0].startswith('# 切片投稿：')
+                and lines[4]=='性质：切片作者发布的视频标题；不是主播本人的新动态，也不能据发布时间推断片中事件发生时间。未观看视频，没有视频内容总结。'):
+                lines[4]='事件：已发布的相关切片投稿。\n已取得内容：切片标题、发布者、发布时间。\n片中事件发生时间：未提供。\n视频内容总结：尚未取得。'
+            elif (kind in {'bilibili_dynamic','weibo'} and len(lines)>4 and lines[0].startswith('# ')
+                  and lines[3]=='性质：公开账号发布内容；转发原文有独立作者，不等同于本人观点。'):
+                lines[3]='事件：已获取的公开账号动态；转发内容按原作者标注。'
+            elif (kind=='bilibili_live' and len(lines)==6 and lines[0].startswith('# ')
+                  and lines[2]=='这不是精确开播或下播时间，也不代表此刻仍处于这个状态。当前状态以 role_activity 为准。'
+                  and lines[5]=='未观看直播，不能据此编造直播内容。'):
+                lines[2]='记录类型：直播状态观察。';lines[5]='直播内容总结：尚未取得。'
+            text='\n'.join(lines)
+            if text!=raw:
+                lore.update_document(root,record['id'],{'text':text});changed+=1
+    return changed
 
 
 def _read(root,name,default):
@@ -84,7 +118,7 @@ def _post_document(r,event,now):
     for block in blocks[:2]:
         if not isinstance(block,dict):continue
         text='\n'.join(str(block.get(k,'')) for k in ('label','title','text') if block.get(k))
-        if block.get('images_total') or block.get('images'):text+='\n[含配图；此资料未识图，不推断图片内容]'
+        if block.get('images_total') or block.get('images'):text+='\n[含配图；此资料未识图]'
         if block.get('truncated'):text+='\n[平台返回的是预览或截断内容]'
         if text:parts.append(text)
     content='\n\n'.join(parts) or str(event.get('summary',''))
@@ -94,7 +128,7 @@ def _post_document(r,event,now):
     url=('https://t.bilibili.com/' if r['type']=='bilibili_dynamic' else 'https://m.weibo.cn/detail/')+key
     name='activity-'+hashlib.sha256((r['key']+':'+key).encode()).hexdigest()+'.md'
     return {'name':name,'title':f"{r['name']} · {platform} · {date[:10]} · {key}",
-        'text':f"# {r['name']}的{platform}\n发布时间（UTC）：{date}\n来源：{url}\n性质：公开账号发布内容；转发原文有独立作者，不等同于本人观点。\n\n{content[:10000]}",
+        'text':f"# {r['name']}的{platform}\n发布时间（UTC）：{date}\n来源：{url}\n事件：已获取的公开账号动态；转发内容按原作者标注。\n\n{content[:10000]}",
         'category':'reference','collection':'角色动态','sources':[url],'tags':[r['name'],platform,'历史动态'],
         'activity_source':r['key'],'context_until':stamp+DAY,'always_include':False,
         'event_date':date[:10],'attribution':'现有订阅接口返回的公开文本；未观看视频或识别配图。'}
@@ -113,7 +147,7 @@ def _video_document(r,event,now,keywords):
     identity=r['key']+':'+bvid
     return {'name':'activity-'+hashlib.sha256(identity.encode()).hexdigest()+'.md',
         'title':title[:200],
-        'text':f"# 切片投稿：{title}\n发布者：{r['name']}\n投稿动态发布时间（UTC）：{date}\n视频：{url}\n性质：切片作者发布的视频标题；不是主播本人的新动态，也不能据发布时间推断片中事件发生时间。未观看视频，没有视频内容总结。",
+        'text':f"# 切片投稿：{title}\n发布者：{r['name']}\n投稿动态发布时间（UTC）：{date}\n视频：{url}\n事件：已发布的相关切片投稿。\n已取得内容：切片标题、发布者、发布时间。\n片中事件发生时间：未提供。\n视频内容总结：尚未取得。",
         'category':'reference','collection':'角色动态','sources':[url],
         'tags':[r['name'],'切片投稿'],'activity_source':r['key'],'context_until':stamp+DAY,
         'always_include':False,'event_date':date[:10],
@@ -145,7 +179,7 @@ def _live_document(r,previous,now):
     identity=r['key']+':'+session+':'+str(live)
     return {'name':'activity-'+hashlib.sha256(identity.encode()).hexdigest()+'.md',
         'title':f"{r['name']} · {action} · {date[:16]}",
-        'text':f"# {r['name']}：{action}\n观察时间（UTC）：{date}\n这不是精确开播或下播时间，也不代表此刻仍处于这个状态。当前状态以 role_activity 为准。\n直播标题：{title}\n来源：{r['url']}\n未观看直播，不能据此编造直播内容。",
+        'text':f"# {r['name']}：{action}\n观察时间（UTC）：{date}\n记录类型：直播状态观察。\n直播标题：{title}\n来源：{r['url']}\n直播内容总结：尚未取得。",
         'category':'reference','collection':'角色动态','sources':[r['url']],
         'tags':[r['name'],'直播记录'],'activity_source':r['key'],
         'context_until':stamp+DAY,'always_include':False,'event_date':date[:10]}
@@ -160,6 +194,9 @@ def sync(root,observed,now=None,*,only_sources=None,backfill=False):
         reports=[]
         state=_read(root,'role_activity_state.json',{'seen':[],'sources':{}})
         before=deepcopy(state);seen=set(state['seen'])
+        if state.get('archive_format',1)<2:
+            _upgrade_archive_headers(root)
+            state['archive_format']=2
         # Reconcile an interrupted write between lore commit and state commit.
         names=set()
         with lore._store(root).db() as db:

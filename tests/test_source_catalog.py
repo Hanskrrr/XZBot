@@ -105,7 +105,8 @@ def test_clip_archive_keyword_filter_timestamp_and_video_dedup(tmp_path):
     role_activity.sync(tmp_path,[r],now)
     docs=lore.list_documents(tmp_path)['documents'];assert len(docs)==1
     text=lore.get_document(tmp_path,docs[0]['id'])['text']
-    assert '阿梓游戏切片' in text and '未观看视频' in text and '不' in text
+    assert '阿梓游戏切片' in text and '已发布的相关切片投稿' in text
+    assert '片中事件发生时间：未提供' in text and '不是主播本人的新动态' not in text
     role_activity.sync(tmp_path,[r|{'last_check':now+10}],now+10)
     assert lore.list_documents(tmp_path)['total']==1
     assert lore.for_prompt(tmp_path,'无关问题')[0]['selection_reason']=='recent_activity'

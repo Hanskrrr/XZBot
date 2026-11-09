@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import re
 import threading
+import time
 from .settings import private_write
 from fastapi import Request
 
@@ -60,12 +61,25 @@ def _validate(values):
     return values
 
 
-def overrides(root):
-    if root is None: return {}
+def _document(root):
+    empty={'schema':2,'defaults':{},'overrides':{},'defaults_saved_at':0}
+    if root is None:return empty
     path=_path(root)
-    if not path.exists(): return {}
-    if path.stat().st_size>250000: raise ValueError('prompt_file_too_large')
-    return _validate(json.loads(path.read_text()))
+    if not path.exists():return empty
+    if path.stat().st_size>512000:raise ValueError('prompt_file_too_large')
+    data=json.loads(path.read_text())
+    if not isinstance(data,dict):raise ValueError('prompt_file_invalid')
+    if 'schema' not in data:return empty|{'overrides':_validate(data)}
+    if (set(data)!=set(empty) or data['schema']!=2
+        or type(data['defaults_saved_at']) not in (int,float)
+        or not 0<=data['defaults_saved_at']<1e12):raise ValueError('prompt_file_invalid')
+    _validate(data['defaults']);_validate(data['overrides'])
+    _validate(DEFAULTS|data['defaults']|data['overrides'])
+    return data
+
+
+def overrides(root):
+    return _document(root)['overrides']
 
 
 def character_name(root):
@@ -96,14 +110,21 @@ def character_name(root):
     return '人设中的人物'
 
 
-def revision(values, *, character=None):
+def revision(values, *, character=None, defaults=None, saved_at=0):
     # Defaults also participate, so an upgrade cannot silently accept a stale editor.
-    payload = {'blocks': DEFAULTS|values, 'character_name': character}
+    payload = {'blocks': DEFAULTS|(defaults or {})|values, 'character_name': character,
+               'saved_defaults':defaults or {},'defaults_saved_at':saved_at}
     return hashlib.sha256(json.dumps(payload,ensure_ascii=False,sort_keys=True).encode()).hexdigest()[:20]
 
 
+def current_revision(root,document=None):
+    data=_document(root) if document is None else document
+    return revision(data['overrides'],character=character_name(root),defaults=data['defaults'],saved_at=data['defaults_saved_at'])
+
+
 def prompt(root,key,settings=None):
-    value=overrides(root).get(key,DEFAULTS[key])
+    data=_document(root)
+    value=data['overrides'].get(key,data['defaults'].get(key,DEFAULTS[key]))
     if settings is not None:
         params={'character_name':character_name(root),
                 'max_reply_chars':settings.group_chat_max_reply_chars,'max_voice_chars':settings.max_voice_chars,
@@ -121,27 +142,35 @@ def with_persona(root, persona, policy, settings):
 
 def describe(root,settings):
     with LOCK:
-        values=overrides(root)
-        return {'revision':revision(values,character=character_name(root)),
+        data=_document(root);values=data['overrides'];defaults=data['defaults']
+        return {'revision':current_revision(root,data),
+            'has_saved_defaults':bool(defaults),'defaults_saved_at':data['defaults_saved_at'],
             'variable_values':{'character_name':character_name(root)},
             'blocks':[{'key':key,'title':row['title'],
-            'text':values.get(key,row['text']),'default':row['text'],'customized':key in values,
+            'text':values.get(key,defaults.get(key,row['text'])),'default':defaults.get(key,row['text']),
+            'program_default':row['text'],'default_source':'saved' if key in defaults else 'program','customized':key in values,
             'rendered':prompt(root,key,settings)} for key,row in CATALOG.items()],
             'scenes':SCENES,'variables':sorted(VARIABLES)}
 
 
-def save(root,changes,expected):
+def save(root,changes,expected,*,as_default=False):
     with LOCK:
-        old=overrides(root)
-        if expected!=revision(old,character=character_name(root)): raise PromptConflict('prompt_revision_changed')
-        if not isinstance(changes,dict) or not changes or set(changes)-DEFAULTS.keys():
+        data=_document(root);old=data['overrides']
+        if expected!=current_revision(root,data): raise PromptConflict('prompt_revision_changed')
+        if not isinstance(changes,dict) or (not changes and not as_default) or set(changes)-DEFAULTS.keys():
             raise ValueError('prompt_key_invalid')
         result=dict(old)
         for key,value in changes.items():
             if value is None:result.pop(key,None)
             else:result[key]=value
         _validate(result)
-        private_write(_path(root),json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+        effective=_validate(DEFAULTS|data['defaults']|result)
+        if as_default:
+            data.update(defaults=effective,overrides={},defaults_saved_at=time.time())
+        else:data['overrides']=result
+        # Defaults and active edits commit together; a crash cannot leave one
+        # updated without the other. Legacy flat files are upgraded on write.
+        private_write(_path(root),json.dumps(data,ensure_ascii=False,indent=2)+'\n')
 
 
 def create_router(engine):
@@ -152,12 +181,15 @@ def create_router(engine):
         current=engine.current
         return describe(current.content_root,current.settings())
     @router.put('')
-    async def put(request:Request):
+    async def put(request:Request):return await update(request)
+    @router.post('/defaults')
+    async def defaults(request:Request):return await update(request,as_default=True)
+    async def update(request:Request,*,as_default=False):
         try:
             body=await request.json()
             if not isinstance(body,dict) or set(body)!={'changes','revision'}:raise ValueError()
             current=engine.current
-            save(current.content_root,body['changes'],body['revision'])
+            save(current.content_root,body['changes'],body['revision'],as_default=as_default)
             engine.invalidate_groups(reason="prompts_changed")
             return describe(current.content_root,current.settings())
         except PromptConflict:

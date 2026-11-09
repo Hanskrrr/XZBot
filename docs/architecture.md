@@ -60,3 +60,7 @@ AstrBot 原生 PersonaManager/ConversationManager/Provider 不构成本项目当
 微博适配参考 [RSSHub 的 user 路由](https://github.com/DIYgod/RSSHub/blob/master/lib/routes/weibo/user.ts)（文件 SHA `a818bb61aded808818ecdabbe148f105c4119e65`）与 [utils](https://github.com/DIYgod/RSSHub/blob/master/lib/routes/weibo/utils.ts)（`fd7fcf71937af689e03fdb86751e9eaba5652043`）：移动端 getIndex、动态发现 containerid、配置 Cookie、按来源缓存及移动请求头。RSSHub 还提供浏览器访客会话获取；XZBot 不运行这套浏览器自动会话，配置的登录凭据失效时须更新。不能把采用相同端点等同于平台可用性保证。
 
 独立的 `/api/config` 登录检查参考 [AstrBot 微博订阅插件 `_check_cookie_health`](https://github.com/jiantoucn/astrbot_plugin_weibo_monitor/blob/main/main.py)（文件 SHA `84cda9d2d608be40b886c35c6037b81b9d594ff7`）。XZBot 区分登录检查与动态来源健康度，按精确凭据指纹绑定检查结果，指纹不返回管理 API；SQLite 单行租约合并重复点击，响应与错误文本不落库。只有明确 `login:false` 阻止这份凭据的后续抓取；网络错误和 432 不被自动当成失效，成功验证也不会清空已有平台退避时间。
+
+Profile 的 `content/prompts.json` 支持原来的平铺 overrides 和 schema 2（`defaults`、`overrides`、`defaults_saved_at`）。优先级为本段编辑 > 此角色保存的默认 > 程序初始值。保存为默认以一个原子文件提交当前有效整套文字与空 overrides，不存在两个文件只更新一半的状态；默认版本、程序初始值与角色名称共同参与 revision 和冲突校验。管理员端点 `POST /admin/prompts/defaults` 沿用鉴权、来源与 Profile 校验，成功更新取消旧生成任务。文件属于原有私密 content 备份和迁移范围，不进入公开代码仓库。
+
+角色动态的组装入口为 `Engine._complete_traced` → `role_activity.augment`：将直播状态放入背景数据 `role_activity`，将可编辑的角色动态约定附在人设与场景规则里；近期动态正文由 `lore.for_prompt` 默认选入 `lore`。最后经过预算处理与 `request_context.render`，背景资料和近况仍在最近聊天、当前消息之前。自动归档不再往每篇资料追加角色行为指令；旧生成模板在首次同步时精确迁移，保留文档 ID、原始内容、时间、来源和删除标记。

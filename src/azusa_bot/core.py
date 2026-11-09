@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .prompts import DEFAULTS as PROMPT_DEFAULTS, prompt, overrides as prompt_overrides, revision as prompt_revision, character_name, with_persona
+from .prompts import DEFAULTS as PROMPT_DEFAULTS, prompt, current_revision as prompt_revision, with_persona
 
 import asyncio
 import copy
@@ -475,7 +475,7 @@ class Engine:
         if kind in reply_contract.CHAT_KINDS and ":group:" in scope:
             from .group_policies import FIELDS
             refs["effective_group_settings"] = {key:getattr(settings,key) for key in sorted(FIELDS)}
-        refs["prompt_revision"]=prompt_revision(prompt_overrides(self.content_root),character=character_name(self.content_root))
+        refs["prompt_revision"]=prompt_revision(self.content_root)
         visual_events = retained_events(messages,refs,kind,image_event_id,history_events)
         if settings.vision_enabled and visual_events:
             await self.vision.wait_pending(scope,visual_events)

@@ -29,6 +29,9 @@ async def test_directory_detail_lookup_links_traces_keeps_activity_and_avoids_we
     assert data['knowledge_lookup']['status']=='found'
     assert doc['id'] in data['knowledge_lookup']['document_ids']
     assert data['role_activity']['recent_window_hours']==24
+    assert '自己的近期' in model.calls[-1][0]['content'] or '近期生活与公开活动记录' in model.calls[-1][0]['content']
+    assert '默认怀疑' in model.calls[-1][0]['content']
+    assert '这个梗啥意思' in model.calls[-1][-1]['content']
     records=engine.trajectories.list()['items'];assert len(records)==2
     assert records[0]['related_id']==records[1]['id'] and records[1]['status']=='research_requested'
     assert records[0]['knowledge_lookup']['query']=='星河跳舞'

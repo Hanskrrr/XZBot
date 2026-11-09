@@ -86,3 +86,40 @@ def test_activity_admin_auth_revision_profile_gate_and_read_only_get(library,mon
     assert client.put('/admin/role-activity',headers=h,json=body).status_code==200
     assert client.put('/admin/role-activity',headers=h,json=body).status_code==400
     assert lore.list_documents(root)['total']==1
+
+
+def test_legacy_generated_instructions_migrate_without_changing_source_or_identity(tmp_path):
+    now=time.time();r=row(now);enable(tmp_path,[r])
+    original_body='作者原文：转发原文有独立作者，不等同于本人观点。'
+    doc=activity._post_document(r,json.loads(r['payload'])['events'][0],now)
+    doc['text']=doc['text'].replace('事件：已获取的公开账号动态；转发内容按原作者标注。',
+        '性质：公开账号发布内容；转发原文有独立作者，不等同于本人观点。')+'\n'+original_body
+    saved=lore.import_documents(tmp_path,[doc])['documents'][0]
+    # The copied document has a hand-edited header: the migration must leave it.
+    edited=doc|{'name':'activity-'+'b'*64+'.md','text':doc['text'].replace('性质：','我的备注：')}
+    custom=lore.import_documents(tmp_path,[edited])['documents'][0]
+    assert activity._upgrade_archive_headers(tmp_path)==1
+    result=lore.get_document(tmp_path,saved['id'])
+    assert result['text'].endswith(original_body)
+    assert '事件：已获取的公开账号动态' in result['text']
+    for key in ['id','created_at','context_until','activity_source','sources']:
+        assert result[key]==saved[key]
+    assert lore.get_document(tmp_path,custom['id'])['text']==edited['text']
+    assert activity._upgrade_archive_headers(tmp_path)==0
+
+
+def test_legacy_clip_and_live_headers_migrate_only_once_during_sync(tmp_path):
+    now=time.time();clip=row(now,'bilibili_video');live=row(now,'bilibili_live');enable(tmp_path,[clip,live])
+    title='合成角色一起玩游戏'
+    video=activity._video_document(clip,{'published_at':now-10,'item_type':'DYNAMIC_TYPE_AV',
+        'video':{'bvid':'BV1xx411c7mD','title':title}},now,[])
+    video['text']='\n'.join(video['text'].split('\n')[:4])+('\n性质：切片作者发布的视频标题；不是主播本人的新动态，也不能据发布时间推断片中事件发生时间。未观看视频，没有视频内容总结。')
+    live|={'live_status':1,'session':'synthetic:1000'}
+    broadcast=activity._live_document(live,{},now)
+    broadcast['text']=broadcast['text'].replace('记录类型：直播状态观察。','这不是精确开播或下播时间，也不代表此刻仍处于这个状态。当前状态以 role_activity 为准。').replace('直播内容总结：尚未取得。','未观看直播，不能据此编造直播内容。')
+    saved=lore.import_documents(tmp_path,[video,broadcast])['documents']
+    activity.sync(tmp_path,[clip,live],now)
+    assert '已发布的相关切片投稿' in lore.get_document(tmp_path,saved[0]['id'])['text']
+    assert '记录类型：直播状态观察' in lore.get_document(tmp_path,saved[1]['id'])['text']
+    assert activity._read(tmp_path,'role_activity_state.json',{})['archive_format']==2
+    assert activity._upgrade_archive_headers(tmp_path)==0
