@@ -3,7 +3,7 @@ const {chromium}=require('playwright');
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
 const root=path.resolve(__dirname,'../..');let stage='initial';
 (async()=>{
- const html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8'),checks={},calls=[],errors=[];
+ const html=require('./load-ui.cjs')(root),checks={},calls=[],errors=[];
  const settings={transport:'onebot',onebot_self_id:'100001',onebot_allowed_groups:['300003'],onebot_allowed_dm_users:[],onebot_owners:[],onebot_enabled:true,provider_mode:'mock'};
  let power={state:'running',enabled:true,busy:false,error_code:''},holdOperation='',releaseOperation=null,failStart=false,loseStopResponse=false,failRead=false,previewFailure=true;
  const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'});

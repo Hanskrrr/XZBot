@@ -16,7 +16,7 @@ const {execFileSync}=require('node:child_process');const root=path.resolve(__dir
  try{
  const page=await browser.newPage({viewport:{width:1280,height:1000}});page.setDefaultTimeout(8000);page.on('pageerror',e=>errors.push(e.message));
  await page.route('**/*',async route=>{const req=route.request(),u=new URL(req.url()),method=req.method(),body=req.postDataJSON(),profile=req.headers()['x-xzbot-profile'];calls.push({path:u.pathname,method,body,profile,url:u.href});assert.equal(u.origin,'http://xzbot.test');let result={};
-  if(u.pathname==='/'){await route.fulfill({contentType:'text/html',body:fs.readFileSync(path.join(root,'ui/index.html'),'utf8')});return;}
+  if(u.pathname==='/'){await route.fulfill({contentType:'text/html',body:require('./load-ui.cjs')(root)});return;}
   if(u.pathname==='/admin/groups/idle/trigger')result={id:body.request_id,scope:body.scope,status:'queued'};
   else if(u.pathname.startsWith('/admin/groups/idle/requests/'))result={status:receiptState,...(receiptState==='uncertain'?{error_code:'send_timeout'}:{})};
   else if(u.pathname==='/admin/cloud-budget'){if(method==='PUT')cloudLimit=body.daily_cloud_requests;result={limit:cloudLimit,used:200,remaining:Math.max(0,cloudLimit-200),resets_at:1794182400};}

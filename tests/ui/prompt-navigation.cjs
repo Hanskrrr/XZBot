@@ -9,7 +9,7 @@ const root=path.resolve(__dirname,'../..'),defaults=JSON.parse(fs.readFileSync(p
  const settings={provider_mode:'mock',transport:'onebot',onebot_self_id:'10001',onebot_allowed_groups:['30001'],onebot_allowed_dm_users:[],onebot_owners:[]};
  await page.route('**/*',async route=>{
   const request=route.request(),url=new URL(request.url()),method=request.method(),body=request.postDataJSON();assert.equal(url.origin,'http://xzbot.test');calls.push({path:url.pathname,method,body});let data={};
-  if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:fs.readFileSync(path.join(root,'ui/index.html'),'utf8')});
+  if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:require('./load-ui.cjs')(root)});
   if(url.pathname==='/admin/status')data={settings,credentials:{},stats:{},version:'fixture'};
   else if(url.pathname==='/admin/profiles')data={active_id:active,profiles:[{id:'default',name:'角色甲',voice:{}},{id:'second',name:'角色乙',voice:{}}]};
   else if(url.pathname==='/admin/profiles/second/activate'){active='second';data={active_id:active};}

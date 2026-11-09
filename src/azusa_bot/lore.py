@@ -700,15 +700,22 @@ def for_prompt(root: Path, query: str, limit: int = 3, *, expand_recent=False) -
                 **{key:record[key] for key in _PROVENANCE_FIELDS if key in record}})
         from .role_activity import config
         activity=config(root);keys=set(activity['sources']) if activity['enabled'] else set()
-        recent=[]
+        from .context.recent import POST_LIMIT, VIDEO_LIMIT
+        recent=[]; post_count=video_count=0; now=time.time()
         for record in sorted(records,key=lambda r:r.get('context_until',0),reverse=True):
-            if (record.get('activity_source') not in keys or record.get('context_until',0)<=time.time()
+            if (record.get('activity_source') not in keys or record.get('context_until',0)<=now or record.get('context_until',0)>now+86400
                 or record['always_include'] or record['category']=='unverified'):continue
-            raw=store.text(record);text=raw[:1200]
+            is_video=record.get('activity_source','').startswith('bilibili_video:')
+            if (is_video and video_count>=VIDEO_LIMIT) or (not is_video and post_count>=POST_LIMIT):continue
+            if is_video:video_count+=1
+            else:post_count+=1
+            raw=store.text(record)
+            # Contiguous source prefix keeps deletion/correction-aware trace references.
+            text='\n'.join(raw.split('\n')[:4]) if is_video else raw[:1200]
             recent.append({**{k:record[k] for k in ('title','category','sources','tags','event_date','context_until','activity_source')},
                 'doc_id':record['id'],'chunk_id':f"{record['id']}:recent:{_hash(text.encode())[:20]}",
                 'text':text,'start_char':0,'end_char':len(text),'score':0.,'matched_terms':[],
                 'selection_reason':'recent_activity','excerpted':len(raw)>len(text),'always_include':False})
-            if len(recent)>=6:break
+            if len(full)+len(recent)>=50:break
         excluded=full if expand_recent else full+recent
         return full+recent+_search(db,query,min(limit,50-len(full)-len(recent)),[r['doc_id'] for r in excluded],for_prompt=True)

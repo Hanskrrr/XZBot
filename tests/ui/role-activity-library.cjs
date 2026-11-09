@@ -16,7 +16,7 @@ const root=path.resolve(__dirname,'../..');let step='start';
  await page.route('**/*',async route=>{
   const q=route.request(),u=new URL(q.url()),method=q.method(),body=q.postDataJSON(),profile=q.headers()['x-xzbot-profile'];calls.push({url:u.href,path:u.pathname,method,body,profile});
   if(u.origin!=='http://xzbot.test'){errors.push('external request');await route.abort();return;}
-  if(u.pathname==='/'){await route.fulfill({contentType:'text/html',body:fs.readFileSync(path.join(root,'ui/index.html'),'utf8')});return;}
+  if(u.pathname==='/'){await route.fulfill({contentType:'text/html',body:require('./load-ui.cjs')(root)});return;}
   let result={};
   if(u.pathname==='/admin/status')result={settings,stats:{},credentials:{},version:'offline'};
   else if(u.pathname==='/admin/settings')result=settings;

@@ -1,7 +1,7 @@
 // All browser requests are intercepted; no real QQ, VM, credentials or cloud API.
 const {chromium}=require('playwright');
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
-const root=path.resolve(__dirname,'../..'),html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8');
+const root=path.resolve(__dirname,'../..'),html=require('./load-ui.cjs')(root);
 (async()=>{
  const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'});
  const ctx=await browser.newContext({viewport:{width:1280,height:940}}),calls=[],errors=[];

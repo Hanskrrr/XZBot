@@ -2,7 +2,7 @@
 const {chromium}=require('playwright');const fs=require('node:fs');const path=require('node:path');const assert=require('node:assert/strict');
 const root=path.resolve(__dirname,'../..');let lastWait='startup';
 (async()=>{
- const html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8'),errors=[],calls=[],checks={};
+ const html=require('./load-ui.cjs')(root),errors=[],calls=[],checks={};
  const base={transport:'onebot',onebot_self_id:'100001',onebot_allowed_groups:['300003'],onebot_allowed_dm_users:[],onebot_owners:[],onebot_enabled:true,provider_mode:'cloud',llm_provider:'deepseek',deepseek_model:'deepseek-chat',group_chat_enabled:true};
  const voice={fish_reference_id:'sample-reference',fish_model:'s2.1-pro',voice_enabled:true,voice_authorized:true};
  let active='default',profiles=[{id:'default',name:'阿梓',description:'日常陪伴与群聊 · 原创 AI 同人角色',voice},{id:'study',name:'小序',description:'一起学习与记录想法',voice:{...voice,voice_enabled:false}}],sourceRestricted=false,delayPersona=false,releasePersona=null;

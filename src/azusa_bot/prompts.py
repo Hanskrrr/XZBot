@@ -19,19 +19,19 @@ LOCK = threading.RLock()
 VARIABLES = {'character_name','max_reply_chars','max_voice_chars','idle_minutes','voice_availability'}
 SCENES = {
     '实际输入排列':['persona','examples','direct_header','recent_header','current_header','reply_contract'],
-    '直接回复':['persona_header','persona','direct','knowledge','expression','vision','output','style','dialogue','persona_footer','topic_use','role_activity','search','knowledge_lookup','history_lookup','examples'],
-    '群聊接话':['persona_header','persona','group','knowledge','expression','vision','output','style','dialogue','heat','addressed','persona_footer','topic_use','role_activity','search','knowledge_lookup','history_lookup','examples','participation_vote'],
-    '连续对话':['persona_header','persona','group','knowledge','expression','vision','output','style','dialogue','persona_footer','followup','topic_use','role_activity','search','knowledge_lookup','history_lookup','examples','participation_vote'],
+    '直接回复':['persona_header','persona','direct','knowledge','expression','vision','output','style','dialogue','persona_footer','topic_use','role_activity','recent_situation','search','knowledge_lookup','history_lookup','examples'],
+    '群聊接话':['persona_header','persona','group','knowledge','expression','vision','output','style','dialogue','heat','addressed','persona_footer','topic_use','role_activity','recent_situation','search','knowledge_lookup','history_lookup','examples','participation_vote'],
+    '连续对话':['persona_header','persona','group','knowledge','expression','vision','output','style','dialogue','persona_footer','followup','topic_use','role_activity','recent_situation','search','knowledge_lookup','history_lookup','examples','participation_vote'],
     '当前话题判断':['topic_analysis'],
-    '角色动态同步':['role_activity'],
+    '角色动态同步':['role_activity','recent_situation'],
     '本地资料渐进加载':['knowledge_lookup','knowledge_lookup_done'],
     '按需回读聊天':['history_lookup','history_lookup_done'],
     '工具循环收尾':['execution_done'],
     '预设问答':['examples'],
     '高置信度话题供回答参考':['topic_use'],
     '记忆整理':['summary'],
-    '手动发起群聊':['persona_header','persona','manual_idle','knowledge','style','output','persona_footer','role_activity','examples'],
-    '冷场发言':['persona_header','persona','idle','knowledge','style','output','persona_footer','role_activity','examples','participation_vote'],
+    '手动发起群聊':['persona_header','persona','manual_idle','knowledge','style','output','persona_footer','role_activity','recent_situation','examples'],
+    '冷场发言':['persona_header','persona','idle','knowledge','style','output','persona_footer','role_activity','recent_situation','examples','participation_vote'],
 }
 
 class PromptConflict(ValueError): pass

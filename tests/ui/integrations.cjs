@@ -3,7 +3,7 @@ const {chromium}=require('playwright');
 const fs=require('node:fs');const path=require('node:path');const assert=require('node:assert/strict');
 const root=path.resolve(__dirname,'../..');
 (async()=>{
- const html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8');
+ const html=require('./load-ui.cjs')(root);
  const settings={transport:'onebot',onebot_self_id:'100001',onebot_allowed_groups:['300003'],onebot_allowed_dm_users:['200002'],onebot_owners:[],onebot_enabled:true,provider_mode:'cloud',llm_provider:'deepseek',deepseek_model:'synthetic-model',fish_reference_id:'0123456789abcdef0123456789abcdef',fish_model:'s1',voice_enabled:false,voice_authorized:true};
  const gemini={settings:{model:'gemini-2.5-flash'},credentials:{configured:false,key_count:0,storage:'macOS Keychain'},runtime:{installed:true,running:false,state:'stopped',version:'2.2.8'}};
  const credentialFields={weibo_sub:{configured:false},steam_api_key:{configured:false},bilibili_sessdata:{configured:false},bilibili_bili_jct:{configured:false},bilibili_buvid3:{configured:false}};

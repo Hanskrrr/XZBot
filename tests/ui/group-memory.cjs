@@ -1,7 +1,7 @@
 // Offline only: exercise group defaults and member exclusions with synthetic IDs.
 const {chromium}=require('playwright');
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
-const root=path.resolve(__dirname,'../..'),html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8');
+const root=path.resolve(__dirname,'../..'),html=require('./load-ui.cjs')(root);
 let lastStep='startup';
 (async()=>{
  const checks={},errors=[],calls=[];

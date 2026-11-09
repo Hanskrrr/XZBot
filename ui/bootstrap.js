@@ -1,0 +1,2 @@
+initPageViews();
+connectFromLauncher();

@@ -419,6 +419,7 @@ class TrajectoryStore:
         row["confidence_policy"] = refs.get("confidence_policy")
         row["web_search"] = safe_web_reference(refs.get("web_search"),exchange["preview_redacted"])
         row['role_activity']=None if exchange['preview_redacted'] else refs.get('role_activity')
+        row['recent_situation']=None if exchange['preview_redacted'] else refs.get('recent_situation')
         row['history_lookup']=None if exchange['preview_redacted'] else {k:v for k,v in refs.get('history_lookup',{}).items() if k!='references'} or None
         row['knowledge_lookup']=None if exchange['preview_redacted'] else refs.get('knowledge_lookup')
         threshold=refs.get("confidence_threshold")

@@ -3,7 +3,7 @@ const {chromium}=require('playwright');
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
 const root=path.resolve(__dirname,'../..');
 (async()=>{
- const html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8'),calls=[],errors=[],checks={};
+ const html=require('./load-ui.cjs')(root),calls=[],errors=[],checks={};
  const settings={transport:'onebot',onebot_self_id:'100001',onebot_allowed_groups:['300003'],onebot_allowed_dm_users:[],onebot_owners:[],onebot_enabled:true,provider_mode:'mock'};
  let configured=false,failSave=false;
  const rows=[{id:2,kind:'group_decision',trigger:'group_observation',status:'success',provider_called:true,mode:'silent',usage:{prompt_tokens:12000,completion_tokens:35,total_tokens:12035,prompt_cache_hit_tokens:11000,prompt_cache_miss_tokens:1000},context_budget:{estimated_before:99000,estimated_after:98000,input_budget:120000}}, {id:1,kind:'reply',status:'success',provider_called:true,usage:null}];

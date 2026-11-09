@@ -1,6 +1,6 @@
 // Synthetic online -> offline -> failed -> expired responses, no real QQ actions.
 const {chromium}=require('playwright');const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
-const html=fs.readFileSync(path.resolve(__dirname,'../../ui/index.html'),'utf8');let step='start';
+const html=require('./load-ui.cjs')(path.resolve(__dirname,'../..'));let step='start';
 (async()=>{
  const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'});
  try{

@@ -172,6 +172,10 @@ class _Context:
             if not all(r["message_id"] in retained for r in topic.get("sources",[])):
                 self.data.pop("group_topic",None)
                 self.refs["group_topic"]=dict(self.refs.get("group_topic",{}),status="context_trimmed",injected=False)
+        if 'recent_situation' in self.data:
+            from .context.recent import assessment
+            self.data['recent_situation']=assessment(self.data['lore'],self.data['current_time'])
+            self.refs['recent_situation']=deepcopy(self.data['recent_situation'])
         lookup=self.data.get('knowledge_lookup')
         if lookup:
             retained={r['doc_id'] for r in self.data['lore']}

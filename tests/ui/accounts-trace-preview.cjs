@@ -3,7 +3,7 @@ const {chromium}=require('playwright');
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
 const root=path.resolve(__dirname,'../..');let stage='startup';
 (async()=>{
- const html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8'),calls=[],errors=[],checks={};
+ const html=require('./load-ui.cjs')(root),calls=[],errors=[],checks={};
  const settings={transport:'onebot',onebot_self_id:'100001',onebot_allowed_groups:['300003'],onebot_allowed_dm_users:[],onebot_owners:[],onebot_enabled:true,provider_mode:'mock'};
  const primary={id:'primary',name:'主账号',qq_number:'100001',active_profile_id:'default',active_profile_name:'角色甲',profiles:[{id:'default',name:'角色甲'}],core_running:true,power_state:'running',prepared:true,busy:false};
  const childId='b'.repeat(32),child={id:childId,name:'测试 QQ <img src=x>',core_port:6216,qq_number:'100002',active_profile_id:'default',active_profile_name:'角色甲副本',profiles:[{id:'default',name:'角色甲副本'},{id:'c'.repeat(32),name:'角色乙'}],core_running:false,power_state:'stopped',prepared:false,busy:false};

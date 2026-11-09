@@ -2,7 +2,7 @@
 const {chromium}=require('playwright');const fs=require('node:fs');const path=require('node:path');const assert=require('node:assert/strict');
 const root=path.resolve(__dirname,'../..');let stage='startup';
 (async()=>{
- const html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8'),errors=[],calls=[],checks={};
+ const html=require('./load-ui.cjs')(root),errors=[],calls=[],checks={};
  const scope='onebot:100001:group:300003',settings={transport:'onebot',onebot_self_id:'100001',onebot_allowed_groups:['300003'],onebot_allowed_dm_users:['200002'],onebot_owners:[],onebot_enabled:true,provider_mode:'mock'};
  let active='default',weiboConfigured=false,failSecret=false,delayDetail=false,releaseDetail=null;
  let traces=Array.from({length:21},(_,index)=>({id:22-index,kind:index===0?'summary':'reply',trigger:index===0?'background':'direct',scope,user:'200002',started_at:1700000000-index*60,finished_at:1700000004-index*60,status:index===0?'no_facts':index===1?'failed':'success',error_code:index===1?'upstream_error':'',provider:'offline-fixture',model:'fixture-model',mode:'image',source_event_id:index===0?'':'55555',counts:{memories:1,knowledge:1,history:2,group_context:3,dialogue:2},processed:index===0?12:0,saved:0,output_memory_ids:[]}));

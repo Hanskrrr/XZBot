@@ -43,6 +43,9 @@ def build(target,uv,out):
                 package.writestr(base+'/tools/uv-'+license,(ROOT/'dist'/('uv-'+license)).read_bytes())
             package.writestr(base+'/RELEASE-INFO.json',json.dumps({'version':version,'platform':target,'arch':arch,'commit':commit,'private_data_included':False},indent=2))
             package.writestr(base+'/READ-ME-FIRST.md',z.read('docs/releases.md'))
+    with zipfile.ZipFile(destination,'a',zipfile.ZIP_DEFLATED) as package:
+        manifest={name.removeprefix(base+'/'):hashlib.sha256(package.read(name)).hexdigest() for name in package.namelist()}
+        package.writestr(base+'/RELEASE-FILES.json',json.dumps(manifest,sort_keys=True))
     with zipfile.ZipFile(destination) as verify:
         launcher=verify.read(base+'/Start-XZBot.'+suffix)
         if target=='windows':

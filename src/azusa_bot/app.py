@@ -16,6 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.staticfiles import StaticFiles
 
 from . import __version__
 from .core import Engine, Incoming
@@ -58,6 +59,8 @@ def create_app(root: Path | None = None) -> FastAPI:
     from .role_activity import sync_all
     subscriptions.activity_sync = lambda keys,backfill=False: sync_all(engine,subscriptions,only_sources=keys,backfill=backfill)
     accounts = AccountManager(root)
+    from .updates.service import UpdateService
+    updates = UpdateService(root)
     from .qq_connection import QQConnection
     qq_connection = QQConnection(root)
     def invalidate_activity():
@@ -99,9 +102,13 @@ def create_app(root: Path | None = None) -> FastAPI:
         task = asyncio.create_task(poll_subscriptions())
         memory_task = asyncio.create_task(poll_memory())
         connection_task = asyncio.create_task(qq_connection.run())
+        update_task = asyncio.create_task(updates.run())
         try:
             yield
         finally:
+            update_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await update_task
             connection_task.cancel()
             with suppress(asyncio.CancelledError):
                 await connection_task
@@ -122,6 +129,8 @@ def create_app(root: Path | None = None) -> FastAPI:
     app.state.accounts = accounts
     app.state.qq_connection = qq_connection
     app.state.bot_power = power
+    app.state.updates = updates
+    app.mount("/static", StaticFiles(directory=root / "ui", check_dir=False), name="static")
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
 
     @app.middleware("http")
@@ -221,6 +230,8 @@ def create_app(root: Path | None = None) -> FastAPI:
     app.include_router(trajectory_router(engine), dependencies=[Depends(admin)])
     app.include_router(assets_router(engine), dependencies=[Depends(admin)])
     app.include_router(accounts_router(accounts), dependencies=[Depends(admin)])
+    from .updates.router import create_router as updates_router
+    app.include_router(updates_router(updates), dependencies=[Depends(admin)])
 
     @app.get("/admin/bot-power", dependencies=[Depends(admin)])
     def bot_power_status():

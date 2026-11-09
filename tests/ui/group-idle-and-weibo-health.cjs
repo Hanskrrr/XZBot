@@ -3,7 +3,7 @@ const {chromium}=require('playwright');
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
 const root=path.resolve(__dirname,'../..');
 (async()=>{
- const html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8'),calls=[],errors=[],checks={};
+ const html=require('./load-ui.cjs')(root),calls=[],errors=[],checks={};
  let settings={transport:'onebot',onebot_self_id:'100001',onebot_allowed_groups:['110001','220002'],onebot_allowed_dm_users:[],onebot_owners:[],onebot_enabled:true,provider_mode:'mock',group_chat_enabled:true};
  const now=Date.now()/1000;
  const subscriptions=[{id:'a'.repeat(32),type:'weibo',uid:'456',source_id:'456',kind:'group',target_id:'110001',enabled:true,include_image:true,name:'合成微博来源',last_error:'weibo_response_not_json',next_poll:now+900,source_health:{last_success_at:now-120,last_failure_at:now-60,last_failure_code:'weibo_response_not_json',failures_total:2}}];

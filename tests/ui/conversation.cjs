@@ -9,7 +9,7 @@ const defaults={examples_enabled:true,begin_dialogs:[],segmented_reply:{enabled:
  const settings={provider_mode:'mock',transport:'onebot',onebot_self_id:'10001',onebot_allowed_groups:['30001'],onebot_allowed_dm_users:[],onebot_owners:[]};
  await page.route('**/*',async route=>{
   const req=route.request(),url=new URL(req.url()),body=req.postDataJSON();assert.equal(url.origin,'http://xzbot.test');calls.push({path:url.pathname,method:req.method(),body});let data={};
-  if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:fs.readFileSync(path.join(root,'ui/index.html'),'utf8')});
+  if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:require('./load-ui.cjs')(root)});
   if(url.pathname==='/admin/status')data={settings,credentials:{},stats:{},version:'fixture'};
   else if(url.pathname==='/admin/profiles')data={active_id:active,profiles:[{id:'default',name:'角色甲',voice:{}},{id:'second',name:'角色乙',voice:{}}]};
   else if(/^\/admin\/profiles\/(default|second)\/activate$/.test(url.pathname)){active=url.pathname.split('/')[3];data={active_id:active};}

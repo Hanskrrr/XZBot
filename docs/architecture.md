@@ -64,3 +64,39 @@ AstrBot 原生 PersonaManager/ConversationManager/Provider 不构成本项目当
 Profile 的 `content/prompts.json` 支持原来的平铺 overrides 和 schema 2（`defaults`、`overrides`、`defaults_saved_at`）。优先级为本段编辑 > 此角色保存的默认 > 程序初始值。保存为默认以一个原子文件提交当前有效整套文字与空 overrides，不存在两个文件只更新一半的状态；默认版本、程序初始值与角色名称共同参与 revision 和冲突校验。管理员端点 `POST /admin/prompts/defaults` 沿用鉴权、来源与 Profile 校验，成功更新取消旧生成任务。文件属于原有私密 content 备份和迁移范围，不进入公开代码仓库。
 
 角色动态的组装入口为 `Engine._complete_traced` → `role_activity.augment`：将直播状态放入背景数据 `role_activity`，将可编辑的角色动态约定附在人设与场景规则里；近期动态正文由 `lore.for_prompt` 默认选入 `lore`。最后经过预算处理与 `request_context.render`，背景资料和近况仍在最近聊天、当前消息之前。自动归档不再往每篇资料追加角色行为指令；旧生成模板在首次同步时精确迁移，保留文档 ID、原始内容、时间、来源和删除标记。
+
+
+## 目录边界与当前欠账（0.9.0 RC4 本地版）
+
+当前是同源网页 + HTTP API：FastAPI 托管静态页面与 `/admin/*`，不需要再启动 Node 服务。前后端有接口边界，部署仍在一个进程中。不是 React/Vue 工程，也不是独立部署的前后端。界面已从一个 HTML 大文件拆为：
+
+```text
+ui/
+  index.html                 页面结构
+  styles/app.css             样式
+  app.js                     遗留管理功能与公共 UI 工具
+  features/role-activity.js   角色动态配置、过滤诊断与预览
+  features/updates.js         更新设置和操作
+  bootstrap.js               页面初始化
+src/azusa_bot/
+  app.py                     服务装配、鉴权与遗留路由
+  context/recent.py          当前时间和近期事件窗口
+  updates/                   更新源、下载校验、安装回滚、HTTP 路由
+  host.py                    跨平台权限、进程和锁适配
+  …                          原有对话、记忆、订阅、QQ 适配模块
+scripts/                     安装、启动、发行与维护入口
+config/                      本机业务配置，只有 example.json 公开
+content/                     本机默认角色资料
+accounts/                    各 QQ 实例的私有状态
+runtime/                     第三方运行组件与 QQ 环境
+```
+
+这次是逐步拆分，不是已完成全项目重构。`app.js` 仍较大，`app.py` 仍含旧路由，许多后端模块仍平铺；前端经典脚本还共享公共函数。下一步应沿订阅、角色、记忆、QQ 连接这些功能边界继续提取路由和前端模块，保持已有 API 与数据路径稳定。不要为了目录整齐直接移动正在使用的 content/data/accounts，或引入与本机单用户场景无关的微服务。
+
+## 当前时间与近期事件
+
+每次文字/语音回答、群聊接话、续聊、冷场与手动发言，背景数据都会带 `current_time`：Unix、UTC、北京时间 ISO 字符串。`context.recent.assessment` 从实际带入的近期资料，按来源时间计算 24 小时窗口；它是确定性的时间筛选，不是假装模型思考，也不给未经校准的“事实置信度”。最近 6 条动态正文和最多 24 条切片标题分别保留，合并常驻资料后总资料引用仍受 50 条与整体上下文预算限制。
+
+切片片段保持原资料开头连续四行（标题、作者、投稿时间、链接），使已有来源哈希与删除/纠错机制继续生效。`recent_situation` 只引用文档 ID 与时间，实际内容通过 lore 与原有轨迹引用查看；预算删掉资料时同步重算事件索引。今天/昨天以北京时间判断，投稿时间不冒充片中事件时间。新提示词“此刻时间与最近发生的事情”在每个角色的提示词页可编辑。
+
+关于近况的语义判断在当前回答调用里完成，需要时沿现有有界工具循环查资料/搜索；没有为每条消息新增独立付费判断调用，也没有在后台自动搜索新闻。灰泽满等账号与 Profile 仍分别绑定自己的公开来源。

@@ -3,7 +3,7 @@ const {chromium}=require('playwright');
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
 let stage='startup';
 (async()=>{
- const html=fs.readFileSync(path.resolve(__dirname,'../../ui/index.html'),'utf8'),errors=[],calls=[],checks={};
+ const html=require('./load-ui.cjs')(path.resolve(__dirname,'../..')),errors=[],calls=[],checks={};
  let active='default',failToggle=false,holdToggle=false,releaseToggle;
  const settings={provider_mode:'mock',transport:'onebot',onebot_allowed_groups:[],onebot_allowed_dm_users:[],onebot_owners:[]};
  const docs={default:[{id:'whole',title:'合成核心背景',category:'canon',text:'完整原文\n末尾也必须保留',sources:[],tags:[],always_include:true},{id:'retrieved',title:'合成历史事件',category:'reference',text:'参考原文 <img src=x onerror=alert(1)>',sources:['https://fixture.example/source'],tags:['事件']},{id:'pending',title:'合成待核实',category:'unverified',text:'待核实正文',sources:[],tags:[],always_include:false}],second:[{id:'second-doc',title:'第二角色独立资料',category:'fiction',text:'第二角色原文',sources:[],tags:[],always_include:false}]};

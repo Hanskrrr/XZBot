@@ -3,7 +3,7 @@ const {chromium}=require('playwright');
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
 const root=path.resolve(__dirname,'../..');let stage='startup';
 (async()=>{
- const html=fs.readFileSync(path.join(root,'ui/index.html'),'utf8'),errors=[],calls=[],checks={};
+ const html=require('./load-ui.cjs')(root),errors=[],calls=[],checks={};
  const settings={provider_mode:'mock',llm_provider:'deepseek',deepseek_model:'fixture-model',llm_base_url:'https://fixture.example/v1',compatible_model:'',fish_model:'fixture-voice-model',fish_reference_id:'fixture-voice',transport:'onebot',onebot_allowed_groups:[],onebot_allowed_dm_users:[],onebot_owners:[]};
  const budget={window_tokens:16384,input_budget:14160,output_tokens:1200,safety_tokens:1024,estimated_before:24000,estimated_after:12000,estimator:'utf8_upper_estimate',removed:{history:4,knowledge:1,assets:2,'<img src=x>':99},trimmed:true,blocked:false,attempt:2};
  const traces=[{id:3,context_budget:budget},{id:2,context_budget:{...budget,estimated_after:16000,blocked:true,attempt:1}},{id:1}].map(row=>({kind:'reply',trigger:'direct',status:'success',provider:'mock',model:'fixture',scope:'demo:dm:fixture',user:'fixture',started_at:1700000000,finished_at:1700000001,provider_called:row.id!==2,counts:{},...row}));

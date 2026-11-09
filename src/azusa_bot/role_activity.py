@@ -287,7 +287,7 @@ def current(root,now=None):
         live.append({'source':key,'name':r.get('name',''),'status':status,'title':title,
                      'url':r.get('url',''),'checked_at':r.get('last_check',0),'error':r.get('last_error',''),
                      'fresh_until':r.get('last_check',0)+300})
-    return {'live':live,'recent_window_hours':24,'recent_post_limit':6,'source_role':'公开角色动态同步'}
+    return {'live':live,'recent_window_hours':24,'recent_post_limit':6,'recent_video_limit':24,'source_role':'公开角色动态同步'}
 
 
 def describe(root,observed):
@@ -295,8 +295,17 @@ def describe(root,observed):
     cfg=config(root)
     recent=[r for r in lore.for_prompt(root,'当前近况') if r.get('selection_reason')=='recent_activity'] if cfg['enabled'] else []
     state=_read(root,'role_activity_state.json',{'sources':{}})
-    return {'config':cfg,'revision':revision(cfg),'current':current(root),
-        'context_preview':{'enabled':cfg['enabled'],'automatic':True,'window_hours':24,'max_posts':6,'max_characters_per_post':1200,
+    from .context.recent import clock, assessment
+    diagnostics=[]; now=time.time()
+    for row in observed:
+        if row['key'] not in cfg['sources'] or row['type']!='bilibili_video':continue
+        events=[e for e in json.loads(row['payload']).get('events',[]) if 0<=now-e.get('published_at',0)<DAY]
+        words=cfg.get('clip_keywords',{}).get(row['key'],[])
+        matched=[e for e in events if not words or any(w.casefold() in e.get('video',{}).get('title','').casefold() for w in words)]
+        diagnostics.append({'source':row['key'],'name':row['name'],'keywords':words,'recent_count':len(events),'matched_count':len(matched),'filtered_count':len(events)-len(matched)})
+    return {'config':cfg,'revision':revision(cfg),'current':current(root),'filter_diagnostics':diagnostics,
+        'recent_situation':assessment(recent,clock()),
+        'context_preview':{'enabled':cfg['enabled'],'automatic':True,'window_hours':24,'max_posts':6,'max_videos':24,'max_characters_per_post':1200,
             'items':[{k:r[k] for k in ('doc_id','title','text','context_until','activity_source','sources')} for r in recent]},
         'archive_errors':[{'source':key,'error':r['archive_error']} for key,r in state['sources'].items()
                           if key in cfg['sources'] and r.get('archive_error')],
@@ -307,10 +316,13 @@ def describe(root,observed):
 def augment(engine,messages,settings,kwargs):
     from .prompts import prompt
     value=current(engine.content_root)
-    if value is None:return messages
     prefix=prompt(engine.content_root,'direct_header' if kwargs['kind']=='reply' else 'group_header',settings)
     result=deepcopy(messages);data=json.loads(result[1]['content'][len(prefix):])
+    from .context.recent import clock, assessment
+    data['current_time']=clock();data['recent_situation']=assessment(data.get('lore',[]),data['current_time'])
+    kwargs['refs']['recent_situation']=deepcopy(data['recent_situation'])
     data['role_activity']=value;kwargs['refs']['role_activity']=value
     result[1]['content']=prefix+json.dumps(data,ensure_ascii=False)
-    result[0]['content']+='\n'+prompt(engine.content_root,'role_activity',settings)
+    result[0]['content']+='\n'+prompt(engine.content_root,'recent_situation',settings)
+    if value is not None:result[0]['content']+='\n'+prompt(engine.content_root,'role_activity',settings)
     return result
