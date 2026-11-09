@@ -33,7 +33,9 @@ concurrency:
   cancel-in-progress: false
 jobs:
   sync:
-    runs-on: ubuntu-24.04
+    # Hosted macOS uses a different network path than Azure Ubuntu; compare
+    # real attachment transfers when the latter is throttled cross-region.
+    runs-on: macos-15
     timeout-minutes: 25
     steps:
       - name: Check publishing credential
