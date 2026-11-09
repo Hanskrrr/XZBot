@@ -56,3 +56,7 @@ AstrBot 原生 PersonaManager/ConversationManager/Provider 不构成本项目当
 `subscription_runs` 保存来源读取及角色归档报告；outbox 的 `run_id` 关联本次实际生成的每个目标通知，查看记录时读取最新发送回执。日志是可核对的观察结果，不把入队视作送达，也不推断未取得的内容。正文预览限长并过滤疑似凭据，记录保留 30 天 / 最多 10,000 条。
 
 来源 ID 修改在 SQLite 事务中同时移动消费者、撤销待发送记录、重置新来源基线，并保存 Profile 文件修改的恢复记录。文件按原子写入更新，启动时重放；未完成恢复时暂停来源轮询，避免数据库与角色绑定不一致。名称修改不重置发送游标，历史回执的来源名称和 ID 不随当前对象修改。
+
+微博适配参考 [RSSHub 的 user 路由](https://github.com/DIYgod/RSSHub/blob/master/lib/routes/weibo/user.ts)（文件 SHA `a818bb61aded808818ecdabbe148f105c4119e65`）与 [utils](https://github.com/DIYgod/RSSHub/blob/master/lib/routes/weibo/utils.ts)（`fd7fcf71937af689e03fdb86751e9eaba5652043`）：移动端 getIndex、动态发现 containerid、配置 Cookie、按来源缓存及移动请求头。RSSHub 还提供浏览器访客会话获取；XZBot 不运行这套浏览器自动会话，配置的登录凭据失效时须更新。不能把采用相同端点等同于平台可用性保证。
+
+独立的 `/api/config` 登录检查参考 [AstrBot 微博订阅插件 `_check_cookie_health`](https://github.com/jiantoucn/astrbot_plugin_weibo_monitor/blob/main/main.py)（文件 SHA `84cda9d2d608be40b886c35c6037b81b9d594ff7`）。XZBot 区分登录检查与动态来源健康度，按精确凭据指纹绑定检查结果，指纹不返回管理 API；SQLite 单行租约合并重复点击，响应与错误文本不落库。只有明确 `login:false` 阻止这份凭据的后续抓取；网络错误和 432 不被自动当成失效，成功验证也不会清空已有平台退避时间。

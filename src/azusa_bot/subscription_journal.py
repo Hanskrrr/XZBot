@@ -30,6 +30,8 @@ def initialize(db):
         error TEXT NOT NULL DEFAULT '', retry_at REAL NOT NULL DEFAULT 0,
         cached INTEGER NOT NULL DEFAULT 0, events TEXT NOT NULL DEFAULT '[]',
         targets TEXT NOT NULL DEFAULT '[]', roles TEXT NOT NULL DEFAULT '[]')''')
+    if 'cause' not in {row[1] for row in db.execute('PRAGMA table_info(subscription_runs)')}:
+        db.execute("ALTER TABLE subscription_runs ADD COLUMN cause TEXT NOT NULL DEFAULT ''")
     db.execute('CREATE INDEX IF NOT EXISTS subscription_runs_source ON subscription_runs(source_key,id)')
 
 
@@ -43,7 +45,7 @@ def begin(service, room, trigger):
             (source_key(room),clean(room['name'],80),room['type'],trigger,service.clock())).lastrowid
 
 
-def finish(service, number, *, info=None, error='', retry_at=0, cached=False, targets=(), roles=(), state='success', db=None):
+def finish(service, number, *, info=None, error='', cause='', retry_at=0, cached=False, targets=(), roles=(), state='success', db=None):
     events=[]
     if info:
         for event in info.get('events', [])[-20:]:
@@ -57,10 +59,11 @@ def finish(service, number, *, info=None, error='', retry_at=0, cached=False, ta
             events=[{'id':clean(info['session'],120),'text':clean(info.get('title')),
                      'url':source_url(info['type'],info.get('source_id') or (info['room_id'] if info['type']=='bilibili_live' else info['uid'])), 'observed_state':info['live_status']}]
     if not re.fullmatch(r'[a-z0-9_]{0,100}',error):error='subscription_source_error'
+    if not re.fullmatch(r'[a-z0-9_]{0,100}',cause):cause='subscription_source_error'
     with (service.db() if db is None else nullcontext(db)) as db:
-        db.execute('''UPDATE subscription_runs SET completed_at=?,state=?,error=?,retry_at=?,cached=?,
+        db.execute('''UPDATE subscription_runs SET completed_at=?,state=?,error=?,cause=?,retry_at=?,cached=?,
             source_name=CASE WHEN ?='' THEN source_name ELSE ? END,events=?,targets=?,roles=? WHERE id=?''',
-            (service.clock(),state,error,retry_at,int(cached),clean((info or {}).get('name'),80),
+            (service.clock(),state,error,cause,retry_at,int(cached),clean((info or {}).get('name'),80),
              clean((info or {}).get('name'),80),json.dumps(events),json.dumps(list(targets)),json.dumps(list(roles)),number))
 
 

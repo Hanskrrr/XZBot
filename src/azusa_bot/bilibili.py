@@ -135,6 +135,8 @@ class BilibiliSubscriptions:
             db.execute("CREATE TABLE IF NOT EXISTS subscription_media(path TEXT PRIMARY KEY,created_at REAL NOT NULL)")
             from .subscription_journal import initialize
             initialize(db)
+            from .weibo_session import initialize as initialize_weibo_session
+            initialize_weibo_session(db)
             db.execute('CREATE INDEX IF NOT EXISTS outbox_run ON outbox(run_id)')
             db.execute('CREATE TABLE IF NOT EXISTS subscription_source_edits (id TEXT PRIMARY KEY, edits TEXT NOT NULL)')
 
@@ -577,7 +579,7 @@ class BilibiliSubscriptions:
                         # honor its deadline without compounding poll backoff.
                         admission_wait = str(error) in {
                             "bilibili_dynamic_cooldown", "bilibili_dynamic_request_in_progress",
-                            "weibo_cooldown", "weibo_request_in_progress",
+                            "weibo_cooldown", "weibo_request_in_progress", "weibo_session_invalid",
                         } and error.retry_at > now
                         failures=room["failures"] if admission_wait else min(room["failures"]+1,8)
                         next_poll=error.retry_at if admission_wait else max(
@@ -588,7 +590,8 @@ class BilibiliSubscriptions:
                         targets=[{'subscription_id':r['id'],'kind':r['kind'],'target_id':r['target_id'],'reason':'source_failed'} for r in db.execute('SELECT id,kind,target_id FROM subscriptions WHERE room_id=?',(room['room_id'],))]
                     try:roles=await asyncio.to_thread(self.activity_sync,{source_key(room)})
                     except Exception:roles=[]
-                    journal.finish(self,run,state='deferred' if admission_wait else 'failed',error=str(error),retry_at=next_poll,targets=targets,roles=roles)
+                    cause=self.sources.cooldown.health_many([source_key(room)])[source_key(room)]['last_failure_code'] if admission_wait else ''
+                    journal.finish(self,run,state='deferred' if admission_wait else 'failed',error=str(error),cause=cause,retry_at=next_poll,targets=targets,roles=roles)
                     continue
                 if room.get('name_override'):info=info|{'name':room['name_override']}
                 # Require two successful observations of a Steam change, avoiding

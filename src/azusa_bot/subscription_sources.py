@@ -16,6 +16,7 @@ from .subscription_credentials import credential_values
 DYNAMIC_URL = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space"
 STEAM_URL = "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/"
 WEIBO_URL = "https://m.weibo.cn/api/container/getIndex"
+WEIBO_CONFIG_URL = "https://m.weibo.cn/api/config"
 TYPES = {"bilibili_live", "bilibili_dynamic", "bilibili_video", "steam", "weibo"}
 INTERVALS = {"bilibili_live": 90, "bilibili_dynamic": 300, "bilibili_video": 300, "steam": 90, "weibo": 300}
 # A space feed also carries live recommendations, ads and invalid entries.
@@ -317,7 +318,7 @@ class Sources:
         return 0
 
     async def request(self, url, params, headers, prefix):
-        if url not in {DYNAMIC_URL, STEAM_URL, WEIBO_URL}:
+        if url not in {DYNAMIC_URL, STEAM_URL, WEIBO_URL, WEIBO_CONFIG_URL}:
             raise ValueError("subscription_endpoint_invalid")
         async def fetch(client):
             try:
@@ -514,6 +515,8 @@ class Sources:
         values = await self.credentials(("weibo_sub", "weibo_cookie"))
         cookie = values.get("weibo_cookie") or ("SUB=" + values["weibo_sub"] if values.get("weibo_sub") else "")
         source = "weibo:" + uid
+        from .weibo_session import require_usable_session
+        require_usable_session(self,cookie)
         self.cooldown.claim(source)
         try:
             result = await self._weibo(uid, cookie, now)
@@ -525,13 +528,18 @@ class Sources:
         self.cooldown.success(source)
         return result
 
-    async def _weibo(self, uid, cookie, now):
-        headers = {"Referer": "https://m.weibo.cn/u/" + uid,
-                   "User-Agent": "Mozilla/5.0 (compatible; XZBot/0.3; private subscriptions)",
+    @staticmethod
+    def weibo_headers(cookie, uid=''):
+        # Match the mobile API contract used by RSSHub's Weibo adapter.
+        headers = {"Referer": "https://m.weibo.cn/" + ('u/'+uid if uid else ''),
+                   "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 11_0 like Mac OS X) AppleWebKit/604.1.38 (KHTML, like Gecko) Version/11.0 Mobile/15A372 Safari/604.1",
                    "X-Requested-With": "XMLHttpRequest", "MWeibo-Pwa": "1",
                    "Accept": "application/json, text/plain, */*"}
-        if cookie:
-            headers["Cookie"] = cookie
+        if cookie:headers["Cookie"] = cookie
+        return headers
+
+    async def _weibo(self, uid, cookie, now):
+        headers = self.weibo_headers(cookie, uid)
         fingerprint = hashlib.sha256(cookie.encode()).hexdigest()
         cached = self._weibo_profiles.get(uid)
         if cached and cached[0] > self.clock() and cached[1] == fingerprint:

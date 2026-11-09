@@ -254,9 +254,13 @@ def current(root,now=None):
 
 
 def describe(root,observed):
+    from . import lore
     cfg=config(root)
+    recent=[r for r in lore.for_prompt(root,'当前近况') if r.get('selection_reason')=='recent_activity'] if cfg['enabled'] else []
     state=_read(root,'role_activity_state.json',{'sources':{}})
     return {'config':cfg,'revision':revision(cfg),'current':current(root),
+        'context_preview':{'enabled':cfg['enabled'],'automatic':True,'window_hours':24,'max_posts':6,'max_characters_per_post':1200,
+            'items':[{k:r[k] for k in ('doc_id','title','text','context_until','activity_source','sources')} for r in recent]},
         'archive_errors':[{'source':key,'error':r['archive_error']} for key,r in state['sources'].items()
                           if key in cfg['sources'] and r.get('archive_error')],
         'available':[{'key':r['key'],'name':r['name'],'type':r['type'],'enabled':r['enabled'],

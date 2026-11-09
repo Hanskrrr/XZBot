@@ -157,6 +157,16 @@ def create_router(service, profiles):
     except (OSError,ValueError):pass  # Report pending recovery explicitly in the catalog.
     router = APIRouter(prefix='/admin/subscriptions')
 
+    @router.get('/weibo-session')
+    async def weibo_session_status():
+        from .weibo_session import status
+        return await status(service)
+
+    @router.post('/weibo-session/verify')
+    async def weibo_session_verify():
+        from .weibo_session import verify
+        return await verify(service)
+
     @router.post('/refresh')
     async def refresh(item: RefreshInput):
         try:return await service.refresh(item.sources,notify=item.notify)
