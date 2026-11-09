@@ -223,17 +223,3 @@ def test_dry_run_needs_no_gitee_token_and_performs_no_write(bundle, monkeypatch,
     monkeypatch.setattr('sys.argv', ['sync', '--dry-run'])
     assert sync.main() == 0
     assert '未写入 Gitee' in capsys.readouterr().out
-
-
-def test_upload_reader_reports_progress_and_enforces_body_deadline(tmp_path, monkeypatch, capsys):
-    path = tmp_path / 'release.zip'
-    path.write_bytes(b'package')
-    with path.open('rb') as source:
-        reader = sync.UploadReader(source, path.name)
-        assert reader.fileno() == source.fileno()
-        assert reader.read() == b'package'
-        assert reader.read() == b''
-        assert 'release.zip' in capsys.readouterr().out
-        monkeypatch.setattr(sync.time, 'monotonic', lambda: reader.started + 601)
-        with pytest.raises(sync.SyncError, match='gitee_upload_body_deadline'):
-            reader.read()

@@ -26,29 +26,6 @@ MAX_FILE = 100 * 1024 * 1024
 API = 'https://gitee.com/api/v5'
 
 
-class UploadReader:
-    """Report streamed bytes without logging request headers or response bodies."""
-
-    def __init__(self, source, name):
-        self.source = source
-        self.name = name
-        self.started = time.monotonic()
-        self.sent = 0
-        self.reported = 0
-
-    def __getattr__(self, name):
-        return getattr(self.source, name)
-
-    def read(self, size=-1):
-        require(time.monotonic() - self.started <= 600, 'gitee_upload_body_deadline')
-        block = self.source.read(size)
-        self.sent += len(block)
-        if self.sent - self.reported >= 5 * 1024 * 1024 or not block:
-            print(f'Upload stream: {self.name} {self.sent / 1024 / 1024:.1f} MiB', flush=True)
-            self.reported = self.sent
-        return block
-
-
 class SyncError(Exception):
     """Only locally defined, credential-free codes may be shown in CI logs."""
 
@@ -97,7 +74,6 @@ def download_source(repo, tag, directory):
     require(all(name in assets for name in names), 'github_release_missing_assets')
     require(all(0 < assets[name]['size'] <= MAX_FILE for name in names), 'asset_size_limit')
     patterns = [value for name in names for value in ('--pattern', name)]
-    print(f'Downloading verified GitHub release: {tag}', flush=True)
     gh('release', 'download', tag, '--repo', repo, '--dir', str(directory), *patterns)
     validate_packages(directory, meta, commit)
     return meta, commit
@@ -144,13 +120,11 @@ class Gitee:
             try:
                 response = self.client.request(method, self.base + path,
                                                headers={'Authorization': f'Bearer {self.token}'}, **kwargs)
-            except httpx.HTTPError as error:
+            except httpx.HTTPError:
                 if method == 'GET' and attempt < 2:
                     self.sleep(2 ** attempt)
                     continue
-                phase = {httpx.ConnectTimeout: 'connect_timeout', httpx.WriteTimeout: 'write_timeout',
-                         httpx.ReadTimeout: 'read_timeout', httpx.PoolTimeout: 'pool_timeout'}.get(type(error), 'network_error')
-                raise SyncError('gitee_' + phase + ('_write_outcome_uncertain' if method != 'GET' else '')) from None
+                raise SyncError('gitee_network_or_uncertain_write') from None
             if response.status_code == 404 and missing:
                 return None
             if response.status_code in (429, 500, 502, 503, 504) and method == 'GET' and attempt < 2:
@@ -224,7 +198,6 @@ class Gitee:
         # Validate again here so callers cannot accidentally publish unverified files.
         validate_packages(directory, meta, commit)
         tag = meta['tagName']
-        print(f'Checking Gitee mirror tag: {tag}', flush=True)
         self.wait_for_tag(tag, commit)
         fields = {'tag_name': tag, 'name': meta['name'] or tag, 'body': meta['body'] or '',
                   'prerelease': str(bool(meta['isPrerelease'])).lower()}
@@ -243,22 +216,20 @@ class Gitee:
         uploaded = skipped = 0
         for name in expected_names(version_for(tag)):
             path = directory / name
-            print(f'Checking attachment: {name}', flush=True)
             if self.find_verified(release_id, path):
                 skipped += 1
                 continue
             try:
-                print(f'Uploading: {name} ({path.stat().st_size / 1024 / 1024:.1f} MiB)', flush=True)
                 with path.open('rb') as source:
                     self.request('POST', f'/releases/{release_id}/attach_files',
-                                 files={'file': (name, UploadReader(source, name), 'application/octet-stream')})
+                                 files={'file': (name, source, 'application/octet-stream')})
             except SyncError as error:
                 # Never blindly retry an upload: duplicate files can be created on Gitee.
                 if not self.find_verified(release_id, path):
                     raise error
             require(self.find_verified(release_id, path), 'gitee_uploaded_asset_not_visible_rerun')
             uploaded += 1
-            print(f'Verified: {name}', flush=True)
+            print(f'Verified: {name}')
         # Only promote the release and its actual notes after all 9 files are verified.
         self.request('PATCH', f'/releases/{release_id}', data=fields)
         final = self.request('GET', f'/releases/tags/{tag}')
