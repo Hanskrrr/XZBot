@@ -58,7 +58,7 @@ class Server:
         if path.endswith('/attach_files'):
             if request.method == 'GET':
                 return httpx.Response(200, json=[{'id': i, 'name': n, 'browser_download_url': f'https://gitee.com/downloads/{n}'}
-                                                 for i, n in enumerate(self.files)])
+                                                 for i, n in enumerate(list(self.files))])
             body = request.read()
             if self.fail_after is not None and len(self.files) >= self.fail_after:
                 return httpx.Response(503, text='sensitive server response ' + TOKEN)
@@ -233,7 +233,7 @@ def test_dry_run_needs_no_gitee_token_and_performs_no_write(bundle, monkeypatch,
     assert '未写入 Gitee' in capsys.readouterr().out
 
 
-@pytest.mark.parametrize('size,deadline', [(7, 60), (1024 * 1024 + 1, 300)])
+@pytest.mark.parametrize('size,deadline', [(7, 60), (1024 * 1024 + 1, 1800)])
 @pytest.mark.parametrize('status,exit_code,expected', [('201',0,None), ('000',28,'gitee_upload_curl_28'), ('413',0,'gitee_http_413')])
 def test_curl_upload_keeps_token_off_argv_and_enforces_total_timeout(tmp_path, monkeypatch, capsys, status, exit_code, expected, size, deadline):
     from types import SimpleNamespace
@@ -263,3 +263,27 @@ def test_curl_upload_keeps_token_off_argv_and_enforces_total_timeout(tmp_path, m
 def test_curl_upload_rejects_malformed_credential(tmp_path):
     with pytest.raises(sync.SyncError, match='invalid_credential_format'):
         sync.curl_upload('https://gitee.com/api/v5/upload', 'invalid\nheader: value', tmp_path / 'a.zip')
+
+
+def test_archives_run_concurrently_and_failure_waits_for_other_uploads(bundle):
+    from threading import Barrier
+    meta, directory = bundle
+    server = Server(directory)
+    api = server.api()
+    normal = api.uploader
+    barrier = Barrier(3)
+    def upload(url, token, path):
+        if path.name.endswith('.zip'):
+            barrier.wait(timeout=2)
+            if '-windows-' in path.name:
+                raise sync.SyncError('synthetic_upload_failure')
+        normal(url, token, path)
+    api.uploader = upload
+    with pytest.raises(sync.SyncError, match='synthetic_upload_failure'):
+        api.mirror(meta, COMMIT, directory)
+    # Other workers finish before mirror() returns an error; successful uploads
+    # are retained, and retrying only sends the one missing archive.
+    assert len(server.files) == 8
+    assert '附件镜像尚未完成' in server.release['body']
+    assert server.api().mirror(meta, COMMIT, directory) == (1, 8)
+    assert server.release['body'] == meta['body']

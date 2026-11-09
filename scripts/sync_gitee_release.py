@@ -7,6 +7,7 @@ and validates the source release without reading a Gitee credential or writing.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -131,7 +132,7 @@ def curl_upload(url, token, path):
     value from stdin before sending the file. No redirects or upload retries.
     """
     require('\n' not in token and '\r' not in token, 'invalid_credential_format')
-    deadline = 300 if path.stat().st_size > 1024 * 1024 else 60
+    deadline = 1800 if path.stat().st_size > 1024 * 1024 else 60
     command = ['curl', '--show-error', '--proto', '=https',
                '--connect-timeout', '20', '--max-time', str(deadline), '--retry', '0',
                '--form', 'access_token=<-', '--output', os.devnull,
@@ -276,25 +277,41 @@ class Gitee:
         if set(expected_names(version_for(tag))) - existing_names:
             self.request('PATCH', f'/releases/{release_id}',
                          data=dict(fields, body=pending_notes(meta), prerelease='true'))
-        uploaded = skipped = 0
         paths = [directory / name for name in expected_names(version_for(tag))]
-        # Check small metadata uploads before spending time on native binaries.
-        for path in sorted(paths, key=lambda item: item.stat().st_size):
+
+        def ensure_asset(path):
             name = path.name
             print(f'Checking attachment: {name}', flush=True)
             if self.find_verified(release_id, path):
-                skipped += 1
-                continue
+                return 0, 1
             try:
                 print(f'Uploading: {name} ({path.stat().st_size / 1024 / 1024:.1f} MiB)', flush=True)
                 self.uploader(f'{self.base}/releases/{release_id}/attach_files', self.token, path)
             except SyncError as error:
-                # Never blindly retry an upload: duplicate files can be created on Gitee.
+                # Never blindly retry: a timed-out POST may have committed.
                 if not self.find_verified(release_id, path):
                     raise error
             require(self.find_verified(release_id, path), 'gitee_uploaded_asset_not_visible_rerun')
-            uploaded += 1
             print(f'Verified: {name}', flush=True)
+            return 1, 0
+
+        # Fail quickly on metadata/permission problems, then transfer the three
+        # independent archives concurrently. Wait for every worker before leaving
+        # this method so no upload can outlive its temporary directory or failure.
+        results = [ensure_asset(path) for path in sorted(paths, key=lambda item: item.stat().st_size)
+                   if not path.name.endswith('.zip')]
+        with ThreadPoolExecutor(max_workers=3) as workers:
+            futures = [workers.submit(ensure_asset, path) for path in paths if path.name.endswith('.zip')]
+            errors = []
+            for future in futures:
+                try:
+                    results.append(future.result())
+                except Exception as error:
+                    errors.append(error)
+            if errors:
+                raise errors[0]
+        uploaded = sum(result[0] for result in results)
+        skipped = sum(result[1] for result in results)
         # Only promote the release and its actual notes after all 9 files are verified.
         self.request('PATCH', f'/releases/{release_id}', data=fields)
         final = self.request('GET', f'/releases/tags/{tag}')
