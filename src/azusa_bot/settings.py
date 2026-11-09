@@ -99,6 +99,11 @@ class Settings(BaseModel):
     group_followup_seconds: int = Field(default=180, ge=30, le=900)
     group_followup_max_turns: int = Field(default=4, ge=1, le=12)
     group_followup_min_interval_seconds: int = Field(default=5, ge=2, le=30)
+    group_followup_handoff_enabled: bool = True
+    group_followup_handoff_seconds: int = Field(default=60, ge=10, le=180)
+    group_followup_handoff_messages: int = Field(default=6, ge=1, le=20)
+    group_voice_mode: Literal["auto", "off", "limited"] = "auto"
+    group_voice_daily_limit: int = Field(default=10, ge=1, le=1000, strict=True)
     group_idle_enabled: bool = False
     group_idle_groups: list[QQNumber] = Field(default_factory=list, max_length=100)
     group_idle_minutes: int = Field(default=30, ge=10, le=1440)

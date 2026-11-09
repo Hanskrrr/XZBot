@@ -229,6 +229,8 @@ class Engine:
         self.trajectories = self.memory.trajectories
         (root / "data").mkdir(parents=True,exist_ok=True,mode=0o700)
         self.ledger = Ledger(root / "data/state.sqlite3")
+        from .group_voice import GroupVoice
+        self.group_voice = GroupVoice(self.ledger)
         if profile_id == "default":
             with self.ledger.db() as db:
                 for row in db.execute("SELECT scope,user_id,through_id FROM summaries"):
@@ -248,6 +250,7 @@ class Engine:
         self._scope_generations = {}
         self._context_changes = {}
         self._group_threads: dict[tuple[str,str],dict] = {}
+        self._group_handoffs: dict[str,dict] = {}
         self.dialogue = RecentDialogue(lambda: time.monotonic())
         self._name_decisions: dict[str,float] = {}
         # Only in-flight routing metadata; message text stays in the existing
@@ -813,6 +816,7 @@ class Engine:
                 self.discard_generated_media({"media_path":str((self.root/"data/media"/row[0]).absolute())})
         self.groups.clear_scope(scope)
         self._group_decisions.pop(scope,None)
+        self._group_handoffs.pop(scope,None)
         for key in list(self._group_threads):
             if key[0]==scope:
                 self._group_threads.pop(key,None)
@@ -840,6 +844,7 @@ class Engine:
         self._group_decisions.clear()
         self._group_pending.clear()
         self._group_threads.clear()
+        self._group_handoffs.clear()
 
     def _group_snapshot(self, scope: str, settings: Settings):
         return self.groups.snapshot(scope,limit=settings.group_chat_context_messages,
@@ -949,6 +954,49 @@ class Engine:
                               if now-m["at"] < settings.group_chat_context_minutes*60]
         return thread
 
+    def _handoff_thread(self,event,scope,settings):
+        """A new member may be replying to a recent public, confirmed turn.
+
+        Only the shared group transcript is eligible; another member's private
+        dialogue or memories are never inherited. The model still decides.
+        """
+        from .group_handoff import candidate
+        if self.groups.opted_out(scope,event.user_id):
+            return None
+        context=self._group_snapshot(scope,settings)
+        hint=candidate(context,event.text,settings)
+        if hint is None:
+            return None
+        # Do not reopen this member's already closed/capped conversation merely
+        # because it contains a pronoun. Explicit refer-back keeps its own path.
+        if any(row['message_id']==hint['anchor_message_id'] and row['role']=='assistant'
+               for row in self._dialogue_context(event,scope,settings)):
+            return None
+        state=self._group_handoffs.get(scope)
+        if not state or state['anchor_message_id']!=hint['anchor_message_id']:
+            state={'anchor_message_id':hint['anchor_message_id'],'attempts':0,'last_attempt':0.,'checked':set()}
+            self._group_handoffs[scope]=state
+            if len(self._group_handoffs)>128:
+                self._group_handoffs.pop(next(iter(self._group_handoffs)))
+        if event.user_id in state['checked'] or state['attempts']>=settings.group_followup_max_turns:
+            return None
+        now=time.monotonic()
+        anchor=next(row for row in context if row['message_id']==hint['anchor_message_id'] and row['role']=='assistant')
+        thread=dict(id=uuid.uuid4().hex,born=now,
+                    expires=now+max(0,settings.group_followup_handoff_seconds-hint['anchor_age_seconds']),
+                    turns=0,last_attempt=state['last_attempt'],
+                    messages=[dict(anchor,at=now-hint['anchor_age_seconds'])],generation_at=now,pending=None,
+                    handoff=hint,handoff_state=state)
+        self._group_threads[(scope,event.user_id)]=thread
+        return thread
+
+    def _handoff_current(self,event,scope,thread):
+        if 'handoff' not in thread:
+            return True
+        from .group_handoff import candidate
+        hint=candidate(self._group_snapshot(scope,self.settings(scope)),event.text,self.settings(scope),require_cue=False)
+        return hint is not None and hint['anchor_message_id']==thread['handoff']['anchor_message_id']
+
     @staticmethod
     def _thread_context(thread):
         now=time.monotonic()
@@ -987,6 +1035,9 @@ class Engine:
             self._group_threads[key]=thread
         thread.update(expires=min(now+settings.group_followup_seconds,thread["born"]+900),
                       generation_at=pending["created_at"],pending=None)
+        # Once this member receives an answer, subsequent turns are an ordinary
+        # receipt-confirmed conversation with that member.
+        thread.pop('handoff',None);thread.pop('handoff_state',None)
         if pending.get("user_at") is not None:
             thread["messages"].append({"role":"user","user_id":user,"message_id":pending["event_id"],
                                        "text":pending["user_text"],"at":pending["user_at"]})
@@ -1004,6 +1055,7 @@ class Engine:
         current=lambda: (self._group_allowed_now(event,demo=demo)
                         and context_generation==self.generation(scope)
                         and self.groups.is_latest_user_event(scope,event.user_id,event.event_id)
+                        and self._handoff_current(event,scope,thread)
                         and self._active_thread(scope,event.user_id,self.settings(scope)) is thread)
         if not current():
             return quiet("followup_policy_changed")
@@ -1023,12 +1075,21 @@ class Engine:
             return quiet("cloud_backoff")
         context=self._group_snapshot(scope,settings)
         trace_data = {}
+        if 'handoff' in thread:
+            from .group_handoff import candidate
+            hint=candidate(context,event.text,settings,require_cue=False)
+            if hint is None:
+                return quiet('followup_policy_changed')
+            thread['handoff']=hint
         own_memories = self.memory.retrieve(scope,event.user_id,event.text)
         dialogue=self._dialogue_context(event,scope,settings)
         messages=self._group_prompt(event,scope,settings,context,trace=trace_data,memories=own_memories,dialogue=dialogue)
-        messages[0]["content"] += prompt(self.content_root,"followup",settings)
+        messages[0]["content"] += prompt(self.content_root,"group_handoff" if 'handoff' in thread else "followup",settings)
+        if 'handoff' in thread:
+            trace_data['group_handoff']=dict(thread['handoff'])
         messages.append({"role":"user","content":prompt(self.content_root,"followup_header",settings)+json.dumps({
             "confirmed_dialogue":dialogue,"current_speaker":event.user_id,"latest_text":event.text,
+            "group_handoff":thread.get('handoff'),
             "member_own_memories":own_memories},ensure_ascii=False)})
         trace_data["dialogue_count"] = len(dialogue)
         try:
@@ -1038,6 +1099,12 @@ class Engine:
                 # Capacity waiting is not a paid attempt. A replaced candidate
                 # must not spend a request or move the next call's timestamp.
                 thread["last_attempt"]=time.monotonic()
+                if 'handoff_state' in thread:
+                    state=thread['handoff_state']
+                    if state['attempts']>=settings.group_followup_max_turns:
+                        return quiet('handoff_budget')
+                    state['attempts']+=1;state['last_attempt']=thread['last_attempt']
+                    state['checked'].add(event.user_id)
                 answer=await self._complete_traced(None,messages,settings,kind="followup",
                     trigger="followup",scope=scope,user=event.user_id,refs=trace_data,context_generation=context_generation,
                     image_event_id=event.event_id,request_text=event.text)
@@ -1164,6 +1231,11 @@ class Engine:
             # Re-read after debounce AND lock acquisition: an earlier reply's
             # ACK may have opened this member's conversation while we waited.
             thread=self._active_thread(scope,event.user_id,self.settings(scope)) if not direct else None
+            if thread and 'handoff' in thread and not self._handoff_current(event,scope,thread):
+                self._group_threads.pop((scope,event.user_id),None)
+                thread=None
+            if not direct and not named and thread is None:
+                thread=self._handoff_thread(event,scope,settings)
             # An explicit short reference can reopen a *candidate* dialogue
             # within the live context window, even after the automatic turn cap.
             # Semantic continuation and participation are still judged downstream.
@@ -1502,15 +1574,19 @@ class Engine:
             or re.search(r"https?://|```",response)):
             return result
 
-        voice_trace=None
+        voice_trace=None;voice_reservation=None;voice_called=False
         try:
             # Recheck effective Profile voice settings before beginning a new
             # billable operation. GUI edits also invalidate the generation.
-            latest=self.settings()
+            latest=self.settings(scope)
             if not current():
                 return quiet()
             if not latest.voice_enabled or not latest.voice_authorized:
                 return result
+            if event.kind=='group':
+                voice_reservation=self.group_voice.reserve(scope,latest)
+                if voice_reservation is None:
+                    return result
             provider=provider if provider is not None else self.providers(latest)
             voice_trace=self._trace_start(latest,"tts",trigger,scope,event.user_id,
                 trace_references(input_characters=len(response),source_event_id=event.event_id),
@@ -1521,9 +1597,10 @@ class Engine:
             if not current():
                 raise ProviderError("privacy_context_changed")
             self.trajectories.called(voice_trace)
+            voice_called=True
             path=await provider.synthesize(response)
             result={"mode":"voice","text":response,"media_path":str(path)}
-            latest=self.settings()
+            latest=self.settings(scope)
             if (not current() or not latest.voice_enabled or not latest.voice_authorized
                 or latest.fish_reference_id!=settings.fish_reference_id or latest.fish_model!=settings.fish_model):
                 self.discard_generated_media(result)
@@ -1555,6 +1632,9 @@ class Engine:
                 self.trajectories.finish(voice_trace,"failed",error=exc)
             self.discard_generated_media(result)
             raise
+        finally:
+            if voice_reservation is not None and not voice_called:
+                self.group_voice.release(voice_reservation)
 
     async def summarize_due(self):
         """One fair, bounded background extraction in an enabled live scope."""

@@ -411,6 +411,7 @@ class TrajectoryStore:
         row["request_layout"] = refs.get("request_layout")
         row["reply_contract"] = refs.get("reply_contract")
         row["effective_group_settings"] = refs.get("effective_group_settings")
+        row["group_handoff"] = refs.get("group_handoff")
         row["prompt_revision"] = refs.get("prompt_revision")
         row["begin_dialogs"] = refs.get("begin_dialogs")
         row["execution"] = refs.get("execution")

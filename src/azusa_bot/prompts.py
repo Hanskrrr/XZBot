@@ -21,7 +21,7 @@ SCENES = {
     '实际输入排列':['persona','examples','direct_header','recent_header','current_header','reply_contract'],
     '直接回复':['persona_header','persona','direct','knowledge','expression','vision','output','style','dialogue','conversation_target','persona_footer','topic_use','role_activity','recent_situation','search','knowledge_lookup','history_lookup','examples'],
     '群聊接话':['persona_header','persona','group','knowledge','expression','vision','output','style','dialogue','conversation_target','heat','addressed','persona_footer','topic_use','role_activity','recent_situation','search','knowledge_lookup','history_lookup','examples','participation_vote'],
-    '连续对话':['persona_header','persona','group','knowledge','expression','vision','output','style','dialogue','conversation_target','persona_footer','followup','topic_use','role_activity','recent_situation','search','knowledge_lookup','history_lookup','examples','participation_vote'],
+    '连续对话':['persona_header','persona','group','knowledge','expression','vision','output','style','dialogue','conversation_target','persona_footer','followup','group_handoff','topic_use','role_activity','recent_situation','search','knowledge_lookup','history_lookup','examples','participation_vote'],
     '当前话题判断':['topic_analysis'],
     '角色动态同步':['role_activity','recent_situation'],
     '本地资料渐进加载':['knowledge_lookup','knowledge_lookup_done'],

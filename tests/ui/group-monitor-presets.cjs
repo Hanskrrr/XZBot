@@ -8,7 +8,8 @@ const {execFileSync}=require('node:child_process');const root=path.resolve(__dir
  const policy=Object.fromEntries(Object.entries(settings).filter(([k])=>/^group_/.test(k)&&k!=='group_idle_groups'));
  const policies={[a]:{...policy,group_chat_enabled:true,group_heat_enabled:true,group_idle_enabled:true,group_vote_enabled:true,group_vote_weight_understanding:70},[b]:{...policy,group_heat_enabled:false}};
  const calls=[],errors=[];let stamp=Date.now()/1000;
- const monitor=(scope,profile)=>({scope,profile_id:profile,observed_at:stamp,running:true,participation_enabled:true,
+ const voice=scope=>{const mode=policies[scope].group_voice_mode||'auto',used=scope===a?2:0,limit=mode==='limited'?policies[scope].group_voice_daily_limit:null;return {mode,used,limit,remaining:limit===null?null:Math.max(0,limit-used),profile_voice_available:true};};
+ const monitor=(scope,profile)=>({scope,profile_id:profile,observed_at:stamp,running:true,participation_enabled:true,voice:voice(scope),
   idle:{state:'waiting',last_activity_at:stamp-(scope===a?900:120),elapsed_seconds:scope===a?900:120,threshold_seconds:1800,progress:scope===a?.5:1/15,remaining_seconds:900,attempts_today:1,daily_limit:3,hours_start:9,hours_end:23},
   heat:{enabled:true,hot:false,eligible:false,window_seconds:90,messages:scope===a?6:2,required_messages:8,members:3,required_members:3,progress:scope===a?.75:.25,replies_used:1,replies_limit:3},
   confidence:{silence_seconds:3600,effective:.72},recent_events:scope===a?[{at:stamp,user_id:'20001',status:'decision_cooldown'},{at:stamp-1,user_id:'20002',status:'low_confidence'}]:[{at:stamp,user_id:'20003',status:'collecting_context'}]});
@@ -30,7 +31,7 @@ const {execFileSync}=require('node:child_process');const root=path.resolve(__dir
   else if(u.pathname==='/admin/memory/status')result={stats:{},members:[],retention:{}};
   else if(u.pathname==='/admin/group-settings'){
    const scope=body?.scope||u.searchParams.get('scope')||a;if(method==='PUT')policies[scope]={...body.settings};
-   result={scope,scopes:[{scope:a,label:'测试群 A'},{scope:b,label:'测试群 B'}],settings:policies[scope],revision:'group-fixture',confidence:{silence_seconds:3600,effective:.72}};
+   result={scope,scopes:[{scope:a,label:'测试群 A'},{scope:b,label:'测试群 B'}],settings:policies[scope],voice:voice(scope),revision:'group-fixture',confidence:{silence_seconds:3600,effective:.72}};
   }else if(u.pathname==='/admin/group-settings/status'){
    result=monitor(u.searchParams.get('scope'),profile);if(delay){delay=false;await new Promise(resolve=>release=resolve);}
   }else if(u.pathname.endsWith('/apply')&&u.pathname.startsWith('/admin/group-presets/')){
@@ -67,11 +68,22 @@ const {execFileSync}=require('node:child_process');const root=path.resolve(__dir
  await page.locator('#active-profile').selectOption('other');await page.locator('#activate-profile').click();await wait('group-settings-state','已载入');await page.waitForFunction(()=>document.querySelector('#active-profile').value==='other'&&!document.querySelector('#activate-profile').dataset.busy);assert.equal(await page.locator('#group-preset-select option').count(),3);
  await page.locator('#groups-view-presets').click();await page.locator('#group-preset-select').selectOption('2');await page.locator('#group-preset-load').click();await wait('group-preset-state','已应用到 测试群 B 并生效');assert.equal(policies[b].group_chat_hourly_limit,17);assert(policies[b].group_vote_enabled);assert.equal(policies[b].group_vote_weight_understanding,73);
  page.once('dialog',d=>d.accept());await page.locator('#group-preset-delete').click();await wait('group-preset-state','预设已删除');assert.equal(presets.length,1);assert.equal(policies[a].group_chat_hourly_limit,14);assert.equal(policies[b].group_chat_hourly_limit,17);assert(await page.locator('#group-preset-delete').isDisabled());await page.locator('#group-preset-select').selectOption('1');
+ // Group speech and cross-member handoff share the stable group selector and preset schema.
+ await page.locator('#groups-view-voice').click();assert.equal(await page.locator('#group-voice-mode').inputValue(),'auto');assert(await page.locator('#group-voice-limit').isDisabled());
+ await wait('group-voice-usage','已开始合成 0 次');
+ await page.locator('#group-voice-mode').selectOption('limited');assert(await page.locator('#group-voice-limit').isVisible());await page.locator('#group-voice-limit').fill('4');
+ await page.locator('#group-settings-form button[type=submit]').click();await wait('group-settings-state','已保存并生效');assert.equal(policies[b].group_voice_mode,'limited');assert.equal(policies[b].group_voice_daily_limit,4);assert.equal(policies[a].group_voice_mode,'auto');await wait('group-voice-usage','剩余 4/4');
+ await page.locator('#group-voice-panel').screenshot({path:'/tmp/xzbot-group-voice-desktop.png'});
+ await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);await page.locator('#group-voice-panel').screenshot({path:'/tmp/xzbot-group-voice-mobile.png'});await page.setViewportSize({width:1280,height:1000});
+ await page.locator('#memory-target-scope').selectOption(a);await wait('group-settings-state','测试群 A');assert.equal(await page.locator('#group-voice-mode').inputValue(),'auto');await wait('group-voice-usage','已开始合成 2 次');
+ await page.locator('#group-voice-mode').selectOption('off');await page.locator('#group-settings-form button[type=submit]').click();await wait('group-settings-state','已保存并生效');assert.equal(policies[a].group_voice_mode,'off');assert.equal(policies[b].group_voice_mode,'limited');
+ await page.locator('#groups-view-reply').click();assert(await page.locator('#group-handoff-enabled').isChecked());await page.locator('#group-handoff-enabled').uncheck();await page.locator('#group-handoff-seconds').fill('45');await page.locator('#group-settings-form button[type=submit]').click();await wait('group-settings-state','已保存并生效');assert.equal(policies[a].group_followup_handoff_enabled,false);assert.equal(policies[a].group_followup_handoff_seconds,45);assert(policies[b].group_followup_handoff_enabled);
+ await page.locator('#groups-view-presets').click();
  await page.locator('.group-presets').screenshot({path:'/tmp/xzbot-group-presets-desktop.png'});
  await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);await page.locator('.group-presets').screenshot({path:'/tmp/xzbot-group-presets-mobile.png'});
  await page.locator('#groups-view-monitor').click();await page.locator('#group-observation').screenshot({path:'/tmp/xzbot-group-monitor-mobile.png'});
  await page.locator('[data-tab="knowledge"]').click();const stopped=reads();await page.waitForTimeout(5300);assert.equal(reads(),stopped);
  assert(!calls.some(c=>/\/simulate|\/bridge|\/claim|\/send/.test(c.path)));assert.deepEqual(errors,[]);
- console.log(JSON.stringify({passed:true,checks:['elapsed time','heat progress','5s local polling','inactive page stops polling','preset numbering','one-click apply','explicit draft vs live','no-op apply','template changes do not alter live groups','rename','profile sharing','target group isolation','delete keeps applied settings','stale response isolation','mobile layout']}));
+ console.log(JSON.stringify({passed:true,checks:['elapsed time','heat progress','5s local polling','inactive page stops polling','preset numbering','one-click apply','explicit draft vs live','no-op apply','template changes do not alter live groups','rename','profile sharing','target group isolation','delete keeps applied settings','stale response isolation','mobile layout','voice off/unlimited/limited and group isolation','cross-member handoff controls']}));
  }finally{await browser.close();}
 })().catch(e=>{console.error('Group UI failed at '+step+': '+e.stack);process.exitCode=1;});

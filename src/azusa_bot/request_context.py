@@ -98,6 +98,8 @@ def render(messages, *, kind, prefixes, contract=None, contract_text=None):
         streams.append(followup.get('confirmed_dialogue', []))
         anchor['text'] = followup['latest_text']
         data['continuation_candidate'] = True
+        if followup.get('group_handoff'):
+            data['group_handoff'] = deepcopy(followup['group_handoff'])
     elif kind == 'reply':
         # Explicit /voice or /text commands have already been stripped here.
         anchor['text'] = messages[-1]['content']

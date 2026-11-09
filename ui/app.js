@@ -77,11 +77,12 @@ function initPageViews(){
  c=children('persona');addPageViews('persona',[['body','人设正文'],['examples','预设问答'],['output','分段回复'],['execution','执行循环']],[['body',[c[1],c[c.length-1]]],['examples',[$('dialogue-examples-panel')]],['output',[$('dialogue-output-panel')]],['execution',[$('dialogue-execution-panel')]],['examples output execution',[$('dialogue-save-panel')]]]);
  addPageViews('profiles',[['list','角色与别名'],['guide','角色空间说明']],[['list',[$('profile-list'),$('starter-profile-panel'),$('profile-edit-panel'),$('profiles-state')]],['guide',[$('profile-guide-panel')]]]);
  const groupFields=children('group-settings-fields'),groupPanels=children('groups');
- addPageViews('groups',[['monitor','实时状态'],['reply','接话与续聊'],['topic','话题与热烈参与'],['idle','冷场发言'],['aliases','唤醒别名'],['presets','预设库']], [
+ groupFields[11].before($('group-voice-panel'));
+ addPageViews('groups',[['monitor','实时状态'],['reply','接话与续聊'],['topic','话题与热烈参与'],['idle','冷场发言'],['voice','群语音'],['aliases','唤醒别名'],['presets','预设库']], [
   ['monitor',[$('group-observation'),$('group-recent-panel'),groupPanels[4]]],
   ['aliases',[$('group-alias-panel')]],['reply',[groupPanels[2],...groupFields.slice(2,7),groupFields[10]]],
-  ['reply topic idle',[groupFields[0],groupFields[1]]],['reply topic idle',[groupFields[11],groupFields[12]]],
-  ['topic',[$('group-topic-panel'),$('group-heat-panel')]],['idle',[$('group-idle-panel')]],['monitor idle',[$('group-idle-controls')]],['presets',[document.querySelector('#groups .group-presets')]],['monitor reply topic idle',[groupPanels[6]]],['monitor reply topic idle presets',[groupPanels[3]]]
+  ['reply topic idle',[groupFields[0],groupFields[1]]],['reply topic idle voice',[groupFields[11],groupFields[12]]],['voice',[$('group-voice-panel')]],
+  ['topic',[$('group-topic-panel'),$('group-heat-panel')]],['idle',[$('group-idle-panel')]],['monitor idle',[$('group-idle-controls')]],['presets',[document.querySelector('#groups .group-presets')]],['monitor reply topic idle voice',[groupPanels[6]]],['monitor reply topic idle voice presets',[groupPanels[3]]]
  ]);
  // Keep the selected group visible above every subview, including the alias view.
  const groupSelector=$('group-settings-scope').parentElement;groupSelector.classList.add('page-view-shell');
@@ -698,6 +699,7 @@ const groupFields = [
  ['group-max-reply','group_chat_max_reply_chars',220],
  ['group-followup-seconds','group_followup_seconds',180],['group-followup-turns','group_followup_max_turns',4],
  ['group-followup-interval','group_followup_min_interval_seconds',5],
+ ['group-handoff-seconds','group_followup_handoff_seconds',60],['group-handoff-messages','group_followup_handoff_messages',6],['group-voice-limit','group_voice_daily_limit',10],
  ['group-idle-minutes','group_idle_minutes',30],['group-idle-daily','group_idle_daily_limit',3],
  ['group-decay-floor','group_confidence_floor',0.65],['group-decay-grace','group_confidence_grace_minutes',10],['group-decay-duration','group_confidence_decay_minutes',120],
  ['group-idle-start','group_idle_start_hour',9],['group-idle-end','group_idle_end_hour',23]
@@ -811,21 +813,25 @@ async function loadGroupPolicies(scope=sharedScope,{force=false}={}){
  $('load-group-status').disabled=$('clear-group-context').disabled=!data.scope;
  if(!data.scope){$('group-policy-origin').textContent='请先在「连接与 Owner」中保存群白名单。';return;}
  groupPolicy=data;const settings=data.settings;
- fillGroupForm(settings);$('group-settings-fields').disabled=false;
+ fillGroupForm(settings);renderGroupVoiceUsage(data.voice);$('group-settings-fields').disabled=false;
  $('group-policy-origin').textContent=(data.inherited?'尚未单独保存，当前继承原有默认值。':'此群独立配置。')+'保存只影响所选群；同一账号切换角色后仍保留。';
  $('group-enabled-summary').textContent=settings.group_chat_enabled?'这个群允许自主参与，仍受 QQ 总开关约束。':'这个群的自主参与已关闭。';
  const c=data.confidence;$('group-decay-live').textContent=c?'读取时：Bot 已约 '+Math.floor(c.silence_seconds/60)+' 分钟未发言，当前主动接话门槛 '+c.effective+'。':'';
  previewHeatContext();previewGroupCurve();void loadGroupPresets().catch(e=>message('group-preset-state',e.message,'error'));startGroupMonitor();message('group-settings-state','已载入 '+select.selectedOptions[0].text+' 的设置。','success');
 }
 
+function previewGroupVoice(){const mode=$('group-voice-mode').value;$('group-voice-limit-field').hidden=mode!=='limited';$('group-voice-limit').disabled=mode!=='limited';$('group-voice-description').textContent=({auto:'不设群语音次数上限，角色自行选择。',off:'这个群不生成语音，包括明确要求发语音时；照常用文字或图片回应。',limited:'达到本群上限后自动改用文字；每笔合成满 24 小时后释放相应额度。'})[mode];}
+function renderGroupVoiceUsage(voice,stale=false){$('group-voice-usage').textContent=!voice?'等待读取这个群的语音用量。':(stale?'用量状态已过期，请刷新。':'已生效：'+({auto:'自动 · 不限额',off:'关闭',limited:'自动 · 限额'})[voice.mode]+'。')+'过去 24 小时已开始合成 '+voice.used+' 次'+(voice.limit==null?'。':'，剩余 '+voice.remaining+'/'+voice.limit+' 次。')+(voice.next_slot_at?'下一笔额度释放：'+seenTime(voice.next_slot_at)+'。':'')+(!voice.profile_voice_available?'本群或当前角色未开启语音／授权，使用文字或图片。':'');}
+$('group-voice-mode').addEventListener('change',previewGroupVoice);
 function fillGroupForm(settings){groupDraftSettings={...settings};
  for(const [id,key,fallback] of groupFields)$(id).value=settings[key]??fallback;
- for(const [id,key] of [['group-vote-enabled','group_vote_enabled'],['group-enabled','group_chat_enabled'],['group-topic-enabled','group_topic_enabled'],['group-heat-enabled','group_heat_enabled'],['group-heat-require-topic','group_heat_require_topic'],['group-followup-enabled','group_followup_enabled'],['group-idle-enabled','group_idle_enabled']])$(id).checked=key==='group_heat_require_topic'?settings[key]!==false:settings[key]===true;
+ for(const [id,key] of [['group-vote-enabled','group_vote_enabled'],['group-enabled','group_chat_enabled'],['group-topic-enabled','group_topic_enabled'],['group-heat-enabled','group_heat_enabled'],['group-heat-require-topic','group_heat_require_topic'],['group-followup-enabled','group_followup_enabled'],['group-handoff-enabled','group_followup_handoff_enabled'],['group-idle-enabled','group_idle_enabled']])$(id).checked=['group_heat_require_topic','group_followup_handoff_enabled'].includes(key)?settings[key]!==false:settings[key]===true;
  $('group-decay-mode').value=settings.group_confidence_decay||'fixed';
+ $('group-voice-mode').value=settings.group_voice_mode||'auto';previewGroupVoice();
  previewHeatContext();previewGroupCurve();renderGroupPresetState();}
 function collectGroupForm(){
- const body={...groupDraftSettings,group_confidence_decay:$('group-decay-mode').value};
- for(const [id,key] of [['group-vote-enabled','group_vote_enabled'],['group-enabled','group_chat_enabled'],['group-topic-enabled','group_topic_enabled'],['group-heat-enabled','group_heat_enabled'],['group-heat-require-topic','group_heat_require_topic'],['group-followup-enabled','group_followup_enabled'],['group-idle-enabled','group_idle_enabled']])body[key]=$(id).checked;
+ const body={...groupDraftSettings,group_confidence_decay:$('group-decay-mode').value,group_voice_mode:$('group-voice-mode').value};
+ for(const [id,key] of [['group-vote-enabled','group_vote_enabled'],['group-enabled','group_chat_enabled'],['group-topic-enabled','group_topic_enabled'],['group-heat-enabled','group_heat_enabled'],['group-heat-require-topic','group_heat_require_topic'],['group-followup-enabled','group_followup_enabled'],['group-handoff-enabled','group_followup_handoff_enabled'],['group-idle-enabled','group_idle_enabled']])body[key]=$(id).checked;
  for(const [id,key] of groupFields){const input=$(id),value=Number(input.value);if(!Number.isFinite(value)||!input.checkValidity())throw new Error('请检查群聊设置中的数值范围。');body[key]=value;}
  if(['relevance','understanding','contribution','timing'].reduce((sum,k)=>sum+body['group_vote_weight_'+k],0)<=0)throw new Error('四项投票权重不能全部为 0。');
  if(body.group_confidence_decay!=='fixed'&&body.group_confidence_floor>body.group_chat_confidence_threshold)throw new Error('最低门槛不能高于基础门槛。');
@@ -885,7 +891,7 @@ $('group-preset-delete').addEventListener('click',e=>action(e.currentTarget,'gro
 
 let groupMonitorTimer=null,groupMonitorGeneration=0,groupMonitorBusy=false,groupMonitorData=null,groupMonitorReceived=0,groupMonitorAttempt=0,groupMonitorFailed=false;
 function groupMonitorVisible(){return connected&&!document.hidden&&document.querySelector('.section.active')?.id==='groups'&&groupPolicy?.scope===$('group-settings-scope').value;}
-function stopGroupMonitor(reset=false){if(reset)$('group-recent-events').replaceChildren(el('div','empty','选择群聊后读取。'));clearInterval(groupMonitorTimer);groupMonitorTimer=null;groupMonitorGeneration++;groupMonitorBusy=false;if(reset){groupMonitorData=null;groupMonitorFailed=false;for(const kind of ['cold','heat']){$('group-'+kind+'-value').textContent='—';$('group-'+kind+'-meter').value=0;$('group-'+kind+'-detail').textContent='等待读取这个群的实际状态。';$('group-'+kind+'-state').textContent='';}$('group-observation-state').textContent='';}}
+function stopGroupMonitor(reset=false){if(reset)renderGroupVoiceUsage(null);if(reset)$('group-recent-events').replaceChildren(el('div','empty','选择群聊后读取。'));clearInterval(groupMonitorTimer);groupMonitorTimer=null;groupMonitorGeneration++;groupMonitorBusy=false;if(reset){groupMonitorData=null;groupMonitorFailed=false;for(const kind of ['cold','heat']){$('group-'+kind+'-value').textContent='—';$('group-'+kind+'-meter').value=0;$('group-'+kind+'-detail').textContent='等待读取这个群的实际状态。';$('group-'+kind+'-state').textContent='';}$('group-observation-state').textContent='';}}
 function durationText(seconds){if(seconds===null||seconds===undefined)return '尚无活动记录';const value=Math.max(0,Math.floor(seconds)),h=Math.floor(value/3600),m=Math.floor(value%3600/60),s=value%60;return (h?h+'小时 ':'')+String(m).padStart(2,'0')+'分 '+String(s).padStart(2,'0')+'秒';}
 function renderRecentGroupEvents(rows){
  const local=new Set(['decision_cooldown','collecting_context','merged_into_newer_event','activity_observed','cloud_backoff','observation_excluded','group_chat_disabled','memory_observed','rate_limited']);
@@ -897,6 +903,7 @@ function renderRecentGroupEvents(rows){
 }
 function renderGroupObservation(){
  const data=groupMonitorData;if(!data)return;const age=(performance.now()-groupMonitorReceived)/1000,stale=groupMonitorFailed||age>15;
+ renderGroupVoiceUsage(data.voice,stale);
  const idle=data.idle,heat=data.heat,elapsed=idle.elapsed_seconds===null?null:idle.elapsed_seconds+(stale||!data.running?0:Math.min(age,15));
  $('group-cold-value').textContent=durationText(elapsed);$('group-cold-meter').value=elapsed===null?0:Math.min(100,elapsed/idle.threshold_seconds*100);
  $('group-cold-detail').textContent='冷场门槛 '+durationText(idle.threshold_seconds)+(elapsed===null?'；等待收到群消息。':elapsed>=idle.threshold_seconds?' · 时长已达到':' · 还差 '+durationText(idle.threshold_seconds-elapsed));
@@ -946,6 +953,7 @@ $('load-idle-status').addEventListener('click',e=>action(e.currentTarget,'group-
 }));
 const quietReasons={heat_topic_not_ready:'本次热烈参与的话题判断未达门槛或不可用，未生成回复；原因见话题参考。',cloud_failure:'模型本次调用失败，没有生成角色回复；具体原因请看「运行概览 → 故障诊断」。',internal_failure:'本机处理未完成，没有生成角色回复；请查看本机诊断。',followup_pending:'上一条续聊回复正在发送，等确认后再继续。',followup_not_for_bot:'这句看起来是在对别人说，或已离开与 AI 的对话，AI 不插话。',followup_rate_limited:'刚刚已经续聊过，稍等几秒再接话。',followup_limit:'这段连续对话已达到次数或时长上限，恢复普通群聊节奏。',followup_low_confidence:'AI 不能确定你是否还在对它说话，这次先保持安静。',followup_policy_changed:'续聊已结束、权限或隐私状态已变化，或你的更新消息已替代本条候选。',cloud_backoff:'云端暂时不稳定，已延长等待时间，避免反复请求。',group_chat_disabled:'群聊参与尚未开启，这条普通群聊不会触发回复。',observation_excluded:'这条消息未进入旁听上下文，可能是成员已退出旁听或内容不适合收集。',merged_into_newer_event:'等待时又收到了新消息，已合并到较新的群聊判断。',superseded:'群聊已有更新，这次判断让位给新的消息。',group_policy_changed:'群聊开关或权限已经变化，本次不发言。',privacy_context_changed:'配置或上下文已更新，旧回复已取消；具体触发项请查看调用轨迹。',group_internal_failure:'本次群聊处理未完成，先保持安静；可在本机检查运行状态。',decision_cooldown:'刚刚判断过一次，先继续听大家聊。',collecting_context:'新消息还不够，先积累一点上下文。',group_speaking_budget:'正在冷却，或已达到这个群的主动接话额度。',cloud_budget:'今天的云端调用额度已用完，暂时保持安静。',decision_unavailable:'这次云端接话判断未完成，先保持安静。',context_changed_during_generation:'生成期间群聊有了变化，放弃这条可能过时的回复。',chose_silence:'AI 判断现在不需要插话，继续听大家聊。',low_confidence:'AI 对接话是否合适没有足够把握，选择保持安静。',invalid_group_reply:'没有得到合适的简短回复，本次不发言。',repetitive_reply:'这条回复与刚才太相似，避免重复发言。',rate_limited:'回复间隔太短，稍等一下再试。',duplicate_event:'这条消息已经处理过，不会重复回复。',group_not_allowed:'这个群不在允许回复的名单中。',dm_not_allowed:'这个私聊账号不在允许回复的名单中。',onebot_disabled_or_wrong_self:'普通 QQ 回复尚未开启，或账号配置不一致。',self_event:'这是 AI 自己账号发出的消息，不会触发自问自答。',transport_not_selected:'这条消息所属的接入方式未启用。',cooldown:'主动接话正在冷却。',hour_budget:'已达到过去一小时的主动接话上限。',day_budget:'已达到过去 24 小时的主动接话上限。',scope_capacity:'当前群聊处理容量已满，暂时保持安静。'};
 quietReasons.name_decision_cooldown='这是一条旧版点名冷却记录：当时未调用模型。新版会短暂等待，并合并同成员连发。';
+quietReasons.handoff_budget='本轮角色发言后的群友承接判断已达上限，继续旁听。';
 quietReasons.followup_confidence_invalid='模型没有返回有效的续聊置信度，本次候选回答未发送。';
 quietReasons.context_changed='上下文或隐私状态已经变化，本机取消了尚未发送的回复。';
 quietReasons.bot_stopped='Bot 当前已关闭，未调用模型；请通过页面上方的「启动 Bot」恢复。';
@@ -1320,7 +1328,8 @@ async function loadTrajectoryDetail(id){trajectorySelectedId=id;$('trajectory-de
  if(data.recent_situation){const box=el('div','separated');box.append(el('h3','','此刻与近期事件'),el('p','hint','组装时北京时间：'+data.recent_situation.evaluated_at.local+' · 按发布时间/观察时间保留近24小时；实际保留 '+data.recent_situation.events.length+' 条。'));for(const row of data.recent_situation.events)box.append(el('p','record-meta',row.doc_id+' · '+row.time+' · '+(row.time_basis==='observed_at'?'状态观察':'公开发布时间')));parent.append(box);}
  if(data.role_activity){const box=el('div','separated');box.append(el('h3','','本次角色动态状态'));for(const r of data.role_activity.live||[])box.append(el('p','hint',(r.name||r.source)+' · '+({live:'直播中',offline:'未直播',replay:'轮播',unknown:'未知'}[r.status]||'未知')+' · 检查 '+seenTime(r.checked_at)+(r.title?' · '+r.title:'')));box.append(el('p','hint','近一天动态正文见下方背景资料引用；未识别动态配图或视频。'));parent.append(box);}
  if(data.request_layout){const names={persona:'人物设定与约定',examples:'台词示范',background:'背景、记忆与查阅结果',reply_contract:'本轮输出字段',recent_conversation:'近期真实聊天',earlier_images:'较早图片（保留原消息归属）',current_message:'当前消息及其图片'};parent.append(el('p','notice trajectory-layout',(data.provider_called===false?'准备的输入顺序：':'本次输入顺序：')+(data.request_layout.order||[]).map(k=>names[k]||k).join(' → ')));}
- if(data.effective_group_settings){const policy=data.effective_group_settings,box=el('details','panel trajectory-group-settings');box.append(el('summary','','本次生效的群聊设置'));const required=data.reply_contract?.required||[];box.append(el('p','record-text','分项投票配置：'+(policy.group_vote_enabled?'开启':'关闭')+'；本次请求：'+(required.includes('votes')?'要求四项评分':data.kind==='group_idle_manual'?'手动发起，跳过接话评分':data.kind==='reply'?'直接回应，不经过接话投票':'使用单一接话置信度')));const table=el('table','vote-table');for(const [key,value] of Object.entries(policy)){const field=groupFields.find(row=>row[1]===key),name=({group_vote_enabled:'分项投票',group_chat_enabled:'自主接话',group_followup_enabled:'连续对话',group_heat_enabled:'热烈参与',group_heat_require_topic:'热烈参与先判断话题',group_topic_enabled:'话题理解',group_idle_enabled:'冷场发言',group_confidence_decay:'门槛下降曲线'})[key]||(field?document.querySelector('label[for="'+field[0]+'"]')?.textContent:null);const row=el('tr');row.append(el('td','',name||key),el('td','',typeof value==='boolean'?(value?'开启':'关闭'):String(value)));table.append(row);}box.append(table);parent.append(box);}
+ if(data.group_handoff){const h=data.group_handoff;parent.append(el('p','notice','其他群友承接：参考本群已送达的角色消息 '+h.anchor_message_id+'（当时距今 '+h.anchor_age_seconds+' 秒，之后 '+h.following_messages+' 条群友消息）。出现指代词只会触发判断，是否在对角色说话仍由续聊判断及评分决定。'));}
+ if(data.effective_group_settings){const policy=data.effective_group_settings,box=el('details','panel trajectory-group-settings');box.append(el('summary','','本次生效的群聊设置'));const required=data.reply_contract?.required||[];box.append(el('p','record-text','分项投票配置：'+(policy.group_vote_enabled?'开启':'关闭')+'；本次请求：'+(required.includes('votes')?'要求四项评分':data.kind==='group_idle_manual'?'手动发起，跳过接话评分':data.kind==='reply'?'直接回应，不经过接话投票':'使用单一接话置信度')));const table=el('table','vote-table');for(const [key,value] of Object.entries(policy)){const field=groupFields.find(row=>row[1]===key),name=({group_vote_enabled:'分项投票',group_chat_enabled:'自主接话',group_followup_enabled:'连续对话',group_followup_handoff_enabled:'其他群友承接',group_voice_mode:'群语音档位',group_heat_enabled:'热烈参与',group_heat_require_topic:'热烈参与先判断话题',group_topic_enabled:'话题理解',group_idle_enabled:'冷场发言',group_confidence_decay:'门槛下降曲线'})[key]||(field?document.querySelector('label[for="'+field[0]+'"]')?.textContent:null);const row=el('tr');row.append(el('td','',name||key),el('td','',typeof value==='boolean'?(value?'开启':'关闭'):String(value)));table.append(row);}box.append(table);parent.append(box);}
  if(data.reply_contract){const box=el('details','panel trajectory-contract');box.append(el('summary','','本轮要求的输出字段'),el('p','hint','由调用类型与本群生效设置生成。JSON 格式正确仍可能漏字段，发送前会检查评分和续聊判断。说明文字可在「提示词」编辑。'),el('pre','record-text',JSON.stringify(data.reply_contract,null,2)));if(data.contract_errors?.length)box.append(el('p','notice','缺失或无效字段：'+data.contract_errors.join('、')));parent.append(box);}
  if(data.prompt_revision)parent.append(el('p','hint','提示词版本：'+data.prompt_revision+'；当前内容可在「提示词」编辑。'));
  if(data.group_activity){const h=data.group_activity;parent.append(el('p','notice trajectory-heat','热烈参与：近 '+h.window_seconds+' 秒 '+h.messages+' 条有效消息、'+h.members+' 位成员；本轮前已用 '+h.replies_used+'/'+h.replies_limit+' 次热烈参与额度。'));}

@@ -34,4 +34,5 @@ def snapshot(engine,scope):
           'hours_start':settings.group_idle_start_hour,'hours_end':settings.group_idle_end_hour}
     return {'scope':scope,'profile_id':engine.profile_id,'observed_at':now,'running':active,
             'participation_enabled':settings.group_chat_enabled,'heat':heat,'idle':idle,
-            'confidence':engine.confidence_policy(scope,settings),'recent_events':recent}
+            'confidence':engine.confidence_policy(scope,settings),'recent_events':recent,
+            'voice':engine.group_voice.status(scope,settings)}

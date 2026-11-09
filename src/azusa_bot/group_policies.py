@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from .settings import Settings, private_write, settings_lock
 
-FIELDS = frozenset(k for k in Settings.model_fields if k.startswith(("group_chat_", "group_followup_", "group_heat_", "group_topic_", "group_idle_", "group_confidence_", "group_vote_"))) - {"group_idle_groups"}
+FIELDS = frozenset(k for k in Settings.model_fields if k.startswith(("group_chat_", "group_followup_", "group_heat_", "group_topic_", "group_idle_", "group_confidence_", "group_vote_", "group_voice_"))) - {"group_idle_groups"}
 
 def scopes(settings):
     platform = "onebot" if settings.transport=="onebot" else "qq"
@@ -36,6 +36,8 @@ def effective(root, settings, scope):
         values["group_idle_groups"] = [group] if data["group_idle_enabled"] else []
     else:
         values["group_idle_enabled"] = settings.group_idle_enabled and group in settings.group_idle_groups
+    if values['group_voice_mode'] == 'off':
+        values['voice_enabled'] = False
     return Settings.model_validate(values)
 
 def curve(settings, silence_seconds):
@@ -100,7 +102,8 @@ def create_router(engine):
         if chosen:
             settings=current.settings(chosen)
             result.update(settings={k:getattr(settings,k) for k in sorted(FIELDS)}, revision=revision(data.get(chosen,{})),
-                inherited=chosen not in data, confidence=current.confidence_policy(chosen,settings))
+                inherited=chosen not in data, confidence=current.confidence_policy(chosen,settings),
+                voice=current.group_voice.status(chosen,settings))
         return result
     @router.get("")
     def get(scope: str | None = None): return payload(scope)
