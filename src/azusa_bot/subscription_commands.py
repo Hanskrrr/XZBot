@@ -104,7 +104,7 @@ async def handle_subscription_command(service, event, owner: bool) -> str | None
                 "图文": "这条订阅已改为图文通知。",
                 "文字": "这条订阅已改为文字通知。"}[words[1]]
     except PermissionError:
-        return "只有当前会话已绑定的 owner 可以变更订阅。请在管理页「连接与权限」设置，不能靠聊天自称主人获得权限。"
+        return "只有当前会话已绑定的 owner 可以变更订阅。请在管理页「连接与 Owner」设置，不能靠聊天自称主人获得权限。"
     except (SubscriptionError, ValueError) as error:
         code = str(error)
         if code == "bilibili_subscription_exists":

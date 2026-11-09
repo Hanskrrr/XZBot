@@ -21,3 +21,13 @@
 
 .vote-table{width:100%;border-collapse:collapse;font-size:.88rem}.vote-table th,.vote-table td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line,#e4e4e7)}
 .scope-context{position:sticky;top:12px;z-index:20;display:grid;grid-template-columns:minmax(220px,1fr) minmax(180px,1fr);gap:16px;align-items:center;background:var(--paper,#fff);border:1px solid var(--line);border-left:4px solid var(--accent,#6374cf);border-radius:10px;padding:16px 20px;margin:18px 0 26px;box-shadow:0 4px 16px #00000008}.scope-context label{font-size:14px;font-weight:650;margin-bottom:8px}.scope-context p{margin:0}.scope-context select{font-size:15px}.scope-context.hidden{display:none}#groups[data-scope-kind="dm"]>:not(.section-head):not(#group-scope-note){display:none!important}@media(max-width:650px){.scope-context{top:6px;grid-template-columns:1fr;gap:8px;padding:12px;margin:12px 0 20px}.scope-context .hint{font-size:11px}.scope-context select{font-size:14px}}
+
+/* Account and Bot power read as one compact card above every page, so page
+   titles start higher. The static power explainer stays on the overview. */
+.account-context{margin:0 0 18px;padding:12px 18px}.account-context strong{font-size:15px}.account-context .hint{margin-top:2px}
+.account-context:not(.hidden):has(+.power-panel:not(.hidden)){margin-bottom:0;border-bottom-left-radius:0;border-bottom-right-radius:0}
+.account-context:not(.hidden)+.power-panel:not(.hidden){border-top:0;border-top-left-radius:0;border-top-right-radius:0}
+.power-panel{padding:14px 18px}.power-row h3{font-size:14px;margin-bottom:2px}.power-panel details{margin-top:6px}.power-panel>.status-message:empty{min-height:0}
+body[data-page]:not([data-page="overview"]) :is(.power-panel>details,#qq-health-detail,#qq-health-panel details){display:none}
+#qq-health-panel.separated{margin-top:12px;padding-top:12px}#qq-health-panel .record-head{align-items:center}
+@media(max-width:650px){.account-context{padding:12px 14px;gap:10px}.account-context .toolbar button{min-height:32px;padding:6px 11px}.power-panel{padding:12px 14px}}
