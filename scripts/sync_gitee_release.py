@@ -116,14 +116,15 @@ def curl_upload(url, token, path):
     No redirects or automatic upload retries are enabled.
     """
     require('\n' not in token and '\r' not in token, 'invalid_credential_format')
+    deadline = 300 if path.stat().st_size > 1024 * 1024 else 60
     command = ['curl', '--silent', '--show-error', '--proto', '=https',
-               '--connect-timeout', '20', '--max-time', '300', '--retry', '0',
+               '--connect-timeout', '20', '--max-time', str(deadline), '--retry', '0',
                '--header', '@-', '--output', os.devnull,
                '--write-out', '%{http_code} %{size_upload} %{speed_upload}',
                '--form', f'file=@{path};filename={path.name};type=application/octet-stream', url]
     try:
         result = subprocess.run(command, input=f'Authorization: Bearer {token}\n',
-                                capture_output=True, text=True, timeout=330)
+                                capture_output=True, text=True, timeout=deadline + 30)
     except (OSError, subprocess.SubprocessError):
         raise SyncError('gitee_upload_process_failed_outcome_uncertain') from None
     try:
@@ -247,8 +248,10 @@ class Gitee:
         release_id = release['id']
         require(isinstance(release_id, int), 'gitee_invalid_release_id')
         uploaded = skipped = 0
-        for name in expected_names(version_for(tag)):
-            path = directory / name
+        paths = [directory / name for name in expected_names(version_for(tag))]
+        # Check small metadata uploads before spending time on native binaries.
+        for path in sorted(paths, key=lambda item: item.stat().st_size):
+            name = path.name
             print(f'Checking attachment: {name}', flush=True)
             if self.find_verified(release_id, path):
                 skipped += 1

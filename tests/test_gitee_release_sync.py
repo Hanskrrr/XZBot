@@ -231,18 +231,21 @@ def test_dry_run_needs_no_gitee_token_and_performs_no_write(bundle, monkeypatch,
     assert '未写入 Gitee' in capsys.readouterr().out
 
 
+@pytest.mark.parametrize('size,deadline', [(7, 60), (1024 * 1024 + 1, 300)])
 @pytest.mark.parametrize('status,exit_code,expected', [('201',0,None), ('000',28,'gitee_upload_curl_28'), ('413',0,'gitee_http_413')])
-def test_curl_upload_keeps_token_off_argv_and_enforces_total_timeout(tmp_path, monkeypatch, capsys, status, exit_code, expected):
+def test_curl_upload_keeps_token_off_argv_and_enforces_total_timeout(tmp_path, monkeypatch, capsys, status, exit_code, expected, size, deadline):
     from types import SimpleNamespace
     path = tmp_path / 'package.zip'
     path.write_bytes(b'package')
+    with path.open('r+b') as target:
+        target.truncate(size)
     def run(command, **kwargs):
         assert TOKEN not in repr(command)
         assert command[command.index('--header') + 1] == '@-'
         assert kwargs['input'] == f'Authorization: Bearer {TOKEN}\n'
-        assert command[command.index('--max-time') + 1] == '300'
+        assert command[command.index('--max-time') + 1] == str(deadline)
         assert '--location' not in command
-        assert kwargs['timeout'] == 330
+        assert kwargs['timeout'] == deadline + 30
         return SimpleNamespace(stdout=f'{status} 1234 512', stderr=TOKEN, returncode=exit_code)
     monkeypatch.setattr(sync.subprocess, 'run', run)
     if expected:
