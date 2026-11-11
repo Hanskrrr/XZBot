@@ -31,3 +31,23 @@
 body[data-page]:not([data-page="overview"]) :is(.power-panel>details,#qq-health-detail,#qq-health-panel details){display:none}
 #qq-health-panel.separated{margin-top:12px;padding-top:12px}#qq-health-panel .record-head{align-items:center}
 @media(max-width:650px){.account-context{padding:12px 14px;gap:10px}.account-context .toolbar button{min-height:32px;padding:6px 11px}.power-panel{padding:12px 14px}}
+
+.overview-next{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:20px;background:var(--accent-soft);border-left:3px solid var(--accent)}
+.overview-next h3{margin:0 0 6px}
+.overview-next p{margin:0}
+.overview-next button{flex-shrink:0}
+@media(max-width:650px){.overview-next{align-items:flex-start;flex-direction:column;gap:12px}}
+
+.message-event-detail>div{padding-top:12px}
+.trajectory-view-toggle{margin:0 0 18px}
+#trajectory-page-note{min-width:0;overflow-wrap:anywhere}
+.message-event-heading{margin-bottom:5px;overflow-wrap:anywhere}
+.message-event-trigger{background:var(--canvas);border-radius:8px;padding:10px 12px;margin-bottom:12px;overflow-wrap:anywhere}
+.message-event-trigger p:last-child{margin-bottom:0}
+.message-event-call{margin-top:8px}
+.message-event-call[open]>summary{margin-bottom:10px}
+.message-event-call>summary{overflow-wrap:anywhere}
+.message-event-call-purpose,.message-event-call-meta{display:block;margin:5px 0 0}
+.trajectory-input-messages h4{margin:0 0 8px}
+.trajectory-input-order{padding-inline-start:1.8rem;margin:0 0 12px}
+.trajectory-input-order li{margin:0 0 4px;overflow-wrap:anywhere}

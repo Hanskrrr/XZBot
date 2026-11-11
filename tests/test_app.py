@@ -11,7 +11,7 @@ import pytest
 from support_content import seed_content
 
 from azusa_bot.app import create_app
-from azusa_bot.core import Engine
+from azusa_bot.core import Engine, Incoming
 from azusa_bot.secrets import Credentials
 from azusa_bot.settings import Owner, Settings, private_write, read_settings, write_settings
 
@@ -251,15 +251,79 @@ def test_group_management_exposes_metadata_only_and_clear_preserves_limits(http)
     assert engine.groups.budget_status(scope)['hour_used']==1
 
 
-def test_group_ack_only_bridge_can_confirm_real_receipt(http):
+def test_group_management_reports_effective_limits_with_usage(http):
+    client, root, engine, admin, _ = http
+    first = "onebot:10001:group:30001"
+    second = "onebot:10001:group:30002"
+    write_settings(root, Settings(transport="onebot", onebot_self_id="10001",
+                                 onebot_allowed_groups=["30001", "30002"],
+                                 group_chat_enabled=True, group_chat_hourly_limit=8, group_chat_daily_limit=40))
+    private_write(root / "config/groups.json", json.dumps({
+        first: {"group_chat_enabled": False, "group_chat_cooldown_seconds": 15,
+                "group_chat_hourly_limit": 2, "group_chat_daily_limit": 5},
+    }))
+    for _ in range(2):
+        assert engine.groups.reserve(first, cooldown_seconds=0, hour_limit=8, day_limit=40)
+
+    def status(scope):
+        response = client.get("/admin/groups", params={"scope": scope}, headers=admin)
+        assert response.status_code == 200
+        return response.json()
+
+    overridden = status(first)
+    assert overridden["participation_enabled"] is False
+    assert overridden["budget"]["hour_used"] == overridden["budget"]["hour_limit"] == 2
+    assert overridden["budget"]["day_used"] == 2
+    assert overridden["budget"]["day_limit"] == 5
+    assert overridden["budget"]["reason"] == "hour_budget"
+
+    inherited = status(second)
+    assert inherited["participation_enabled"] is True
+    assert inherited["budget"]["hour_used"] == inherited["budget"]["day_used"] == 0
+    assert inherited["budget"]["hour_limit"] == 8
+    assert inherited["budget"]["day_limit"] == 40
+
+
+def test_group_ack_only_first_bridge_claim_can_confirm_real_receipt(http):
     import time
-    client,_,engine,admin,bridge=http
-    reply='a'*32;scope='onebot:10001:group:30001'
-    engine._group_pending[reply]=dict(scope=scope,user_id='20001',self_id='10001',text='已实际发送的群回复',reservation=None,created_at=time.monotonic())
-    body={'reply_id':reply,'status':'sent','message_id':'12345'}
-    assert client.post('/bridge/ack',json=body,headers=admin).status_code==401
-    assert client.post('/bridge/ack',json={**body,'message_id':'arbitrary'},headers=bridge).status_code==400
-    assert engine.groups.snapshot(scope)==[]
-    assert client.post('/bridge/ack',json=body,headers=bridge).status_code==200
-    assert engine.groups.snapshot(scope)[0]['message_id']=='12345'
-    assert not engine.groups.budget_status(scope)['allowed']
+
+    client, _, engine, admin, bridge = http
+    event = Incoming(transport="onebot", app_id="10001", kind="group", scope_id="30001",
+                     user_id="20001", event_id="1", text="请求")
+    scope = "onebot:10001:group:30001"
+    reply_id = engine.ledger.reserve(event, scope, engine.profile_id, engine.profile_epoch)
+    engine.ledger.mark(reply_id, "prepared", "text")
+    engine._group_pending[reply_id] = dict(
+        scope=scope, user_id=event.user_id, self_id=event.app_id, event_id=event.event_id,
+        text="已实际发送的群回复", reservation=None, created_at=time.monotonic())
+    claim_headers = {**bridge, "X-XZBot-Claim-Receipts": "1"}
+    claim = {"reply_id": reply_id}
+    receipt = {**claim, "status": "sent", "message_id": "12345"}
+    assert client.post("/bridge/ack", json=receipt, headers=admin).status_code == 401
+    assert client.post("/bridge/ack", json={**receipt, "message_id": "arbitrary"}, headers=bridge).status_code == 400
+    assert client.post("/bridge/ack", json=receipt, headers=bridge).status_code == 200
+    assert engine.groups.snapshot(scope) == []
+
+    def authorize(_):
+        return client.post("/bridge/reply/authorize", json=claim, headers=claim_headers).json()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        attempts = list(pool.map(authorize, range(4)))
+    winners = [attempt for attempt in attempts if attempt["allowed"]]
+    assert len(winners) == 1
+    denied = {**claim, "status": "cancelled", "error_code": "send_authorization_denied"}
+    assert client.post("/bridge/ack", json=denied, headers=bridge).status_code == 200
+    assert engine.ledger.deliveries()[0]["status"] == "authorized"
+    assert client.post("/bridge/ack", json=receipt, headers=bridge).status_code == 200
+    assert engine.groups.snapshot(scope) == []
+
+    receipt["claim_token"] = winners[0]["claim_token"]
+    assert client.post("/bridge/ack", json=receipt, headers=bridge).status_code == 200
+    assert client.post("/bridge/ack", json=receipt, headers=bridge).status_code == 200
+    assert client.post("/bridge/ack", json={**receipt, "status": "uncertain", "error_code": "send_timeout"},
+                       headers=bridge).status_code == 200
+    rows = client.get("/admin/trajectories/events", headers=admin).json()["items"]
+    assert rows[0]["status"] == "sent" and rows[0]["error_code"] == ""
+    assert rows[0]["receipt_message_id"] == "12345" and rows[0]["receipt_at"] >= rows[0]["at"]
+    assert [row["message_id"] for row in engine.groups.snapshot(scope)] == ["12345"]
+    assert not engine.groups.budget_status(scope)["allowed"]

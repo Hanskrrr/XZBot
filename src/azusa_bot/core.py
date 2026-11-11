@@ -13,17 +13,19 @@ import re
 import sqlite3
 import time
 import uuid
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 
-from . import lore, assets, web_search, group_topic, participation_vote, conversation_config, segmented_delivery, request_context, reply_contract
+from . import lore, assets, web_search, group_topic, participation_vote, conversation_config, segmented_delivery, request_context, reply_contract, peer_bots
 from .memory import MemoryStore
+from .message_privacy import hidden_message
 from .group_chat import GroupConversation
 from .dialogue import RecentDialogue, refers_back, requests_repeat
-from .providers import CloudProviders, MockProviders, ProviderError
+from .providers import CloudProviders, MockProviders, ProviderError, SUMMARY_OUTPUT_TOKENS
 from .provider_usage import CompletionResult
 from .diagnostics import Diagnostics, safe_code
 from .secrets import load_credentials, resolve_credentials
@@ -31,17 +33,19 @@ from .credential_store import CredentialStoreError
 from .settings import QQ_ID_PATTERN, Settings, read_settings
 from .trajectories import references as trace_references, TrajectorySourceErased
 from .bot_control import activity_allowed, read_control
+from .group_queue import GroupQueue, QueueStopped
 from .context_budget import fit_context, fit_retry, estimate_tokens
 from .vision import VisionCache
 from .vision_prompt import VISION_POLICY, retained_events, attach_images, visual_sources
 from .group_addressing import is_addressed
-from .accounts import AccountError, managed_qq_ids
+from .local_conversation import LocalConversation
+from . import group_planning
 
 log = logging.getLogger("azusa")
 ID = r"^[A-Za-z0-9_-]+$"
 GROUP_COMMANDS = {"/帮助", "/隐私", "/身份", "/记忆", "/记住", "/群记住", "/事件", "/关系", "/忘记", "/纠正", "/忘记我", "/语音", "/文字", "/表情", "/旁听", "/订阅"}
 # Requests that ended locally on purpose; reported as-is, never as a cloud failure.
-LOCAL_STOP_REASONS = frozenset({"bot_stopped","cloud_budget","context_budget_exceeded","context_retry_budget","privacy_context_changed"})
+LOCAL_STOP_REASONS = frozenset({"conversation_plan_changed","conversation_plan_invalid","conversation_plan_unavailable","activity_state_conflict","bot_stopped","cloud_budget","context_budget_exceeded","context_retry_budget","privacy_context_changed"})
 
 
 class _GeneratedContextChanged(ProviderError):
@@ -75,6 +79,13 @@ class QuotedMessage(BaseModel):
     media_types: list[Literal["image", "record", "video", "file"]] = Field(default_factory=list, max_length=4)
 
 
+class MentionedMember(BaseModel):
+    """A public label resolved by the bridge for one native, same-group @ ID."""
+    model_config = ConfigDict(extra="forbid")
+    user_id: str = Field(pattern=QQ_ID_PATTERN)
+    display_name: str = Field(default="",max_length=80)
+
+
 class Incoming(BaseModel):
     model_config = ConfigDict(extra="forbid")
     transport: Literal["official", "onebot"] = "official"
@@ -86,6 +97,9 @@ class Incoming(BaseModel):
     text: str = Field(max_length=10000)
     mentioned: bool = False
     other_mentioned: bool = False
+    mentioned_user_ids: list[Annotated[str,Field(pattern=QQ_ID_PATTERN)]] | None = Field(default=None,max_length=20)
+    mentions_everyone: bool = False
+    mentioned_members: list[MentionedMember] = Field(default_factory=list,max_length=20)
     unprompted: bool = False
     display_name: str = Field(default="", max_length=80)
     reply_to_id: str | None = Field(default=None, max_length=21, pattern=r"^-?[0-9]{1,20}$")
@@ -93,12 +107,33 @@ class Incoming(BaseModel):
     images: list[Annotated[str,Field(max_length=8192)]] = Field(default_factory=list, max_length=3)
     activity_only: bool = False
 
+    @property
+    def mention_only(self):
+        return (self.transport == 'onebot' and self.kind == 'group' and self.mentioned
+                and not self.text.strip() and not self.images)
+
     @model_validator(mode="after")
     def validate_onebot_ids(self):
         if self.transport == "onebot" and not all(
             re.fullmatch(QQ_ID_PATTERN, value) for value in (self.app_id, self.scope_id, self.user_id)
         ):
             raise ValueError("OneBot requires numeric self, group, and user IDs")
+        if self.transport != "onebot" and (self.mentioned_user_ids is not None or self.mentions_everyone or self.mentioned_members):
+            raise ValueError("Native QQ mentions require OneBot")
+        if self.mentioned_user_ids is None:
+            if self.mentions_everyone or self.mentioned_members:
+                raise ValueError("Mention labels require native mention IDs")
+        else:
+            ids = self.mentioned_user_ids
+            if len(ids) != len(set(ids)):
+                raise ValueError("Duplicate native mention IDs")
+            labels = [member.user_id for member in self.mentioned_members]
+            if len(labels) != len(set(labels)) or not set(labels) <= set(ids):
+                raise ValueError("Mention labels must identify distinct native mentions")
+            if self.mentioned_members and self.kind != "group":
+                raise ValueError("Group member labels require a group event")
+            self.mentioned = self.app_id in ids
+            self.other_mentioned = self.mentions_everyone or any(user != self.app_id for user in ids)
         if self.quoted_message and (self.transport != "onebot" or
                 self.quoted_message.message_id != self.reply_to_id or
                 (self.quoted_message.kind, self.quoted_message.scope_id) != (self.kind, self.scope_id)):
@@ -130,6 +165,30 @@ class Ledger:
             for column in ("profile_id", "profile_epoch", "asset_reference"):
                 if column not in columns:
                     db.execute(f"ALTER TABLE deliveries ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            for column in ('source_event_id', 'error_code', 'claim_token'):
+                if column not in columns:
+                    db.execute(f"ALTER TABLE deliveries ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            if "queue_wait_seconds" not in columns:
+                db.execute("ALTER TABLE deliveries ADD COLUMN queue_wait_seconds REAL NOT NULL DEFAULT 0")
+            if "trigger_kind" not in columns:
+                db.execute("ALTER TABLE deliveries ADD COLUMN trigger_kind TEXT NOT NULL DEFAULT ''")
+            if "retry_after_seconds" not in columns:
+                db.execute("ALTER TABLE deliveries ADD COLUMN retry_after_seconds REAL NOT NULL DEFAULT 0")
+            if "peer_bot" not in columns:
+                db.execute("ALTER TABLE deliveries ADD COLUMN peer_bot INTEGER NOT NULL DEFAULT 0")
+            if "group_target" not in columns:
+                db.execute("ALTER TABLE deliveries ADD COLUMN group_target INTEGER NOT NULL DEFAULT 0")
+            if "window_entered" not in columns:
+                db.execute("ALTER TABLE deliveries ADD COLUMN window_entered INTEGER")
+            if "decision_path" not in columns:
+                db.execute("ALTER TABLE deliveries ADD COLUMN decision_path TEXT NOT NULL DEFAULT ''")
+            if "decision_reason" not in columns:
+                db.execute("ALTER TABLE deliveries ADD COLUMN decision_reason TEXT NOT NULL DEFAULT ''")
+            if "receipt_message_id" not in columns:
+                db.execute("ALTER TABLE deliveries ADD COLUMN receipt_message_id TEXT NOT NULL DEFAULT ''")
+            if "receipt_at" not in columns:
+                db.execute("ALTER TABLE deliveries ADD COLUMN receipt_at REAL")
+            db.execute("CREATE INDEX IF NOT EXISTS deliveries_profile_page ON deliveries(profile_id, at DESC, reply_id DESC)")
             segmented_delivery.schema(db)
 
     @contextmanager
@@ -142,15 +201,31 @@ class Ledger:
         finally:
             db.close()
 
+    @staticmethod
+    def event_key(scope: str, event_id: str) -> str:
+        return hashlib.sha256((scope + "|" + event_id).encode()).hexdigest()
+
     def reserve(self, event: Incoming, scope: str, profile_id: str = "default", profile_epoch: str = "") -> str | None:
-        key = hashlib.sha256((scope + "|" + event.event_id).encode()).hexdigest()
+        key = self.event_key(scope, event.event_id)
         reply_id = uuid.uuid4().hex
         with self.db() as db:
             db.execute("DELETE FROM deliveries WHERE at < ?", (time.time() - 30*86400,))
             db.execute("DELETE FROM delivery_segments WHERE reply_id NOT IN (SELECT reply_id FROM deliveries)")
             cur = db.execute("INSERT OR IGNORE INTO deliveries (event_key,reply_id,scope,user_id,status,mode,at,profile_id,profile_epoch) VALUES (?,?,?,?,?,?,?,?,?)",
                 (key, reply_id, scope, event.user_id, "processing", "none", time.time(),profile_id,profile_epoch))
-            return reply_id if cur.rowcount else None
+            if cur.rowcount:
+                source=event.event_id if re.fullmatch(r'-?[0-9]{1,20}',event.event_id) else 'sha256:'+hashlib.sha256(event.event_id.encode()).hexdigest()
+                trigger = ('mention' if event.mentioned else 'quote' if event.reply_to_id
+                           else 'observe' if event.unprompted else 'direct')
+                db.execute('UPDATE deliveries SET source_event_id=?,trigger_kind=?,window_entered=? WHERE reply_id=?',
+                           (source, trigger, 0 if event.kind == 'group' else None, reply_id))
+                return reply_id
+            return None
+
+    def record_intake(self, reply_id: str, path: str, *, window_entered: bool | None = None, reason: str = ''):
+        with self.db() as db:
+            db.execute('UPDATE deliveries SET decision_path=?,decision_reason=?,window_entered=COALESCE(?,window_entered) '
+                       'WHERE reply_id=?', (path, reason, window_entered, reply_id))
 
     def mark(self, reply_id: str, status: str, mode: str | None = None):
         with self.db() as db:
@@ -158,6 +233,24 @@ class Ledger:
                 db.execute("UPDATE deliveries SET status=?,mode=? WHERE reply_id=?", (status, mode, reply_id))
             else:
                 db.execute("UPDATE deliveries SET status=? WHERE reply_id=?", (status, reply_id))
+
+    def accept_receipt(self, reply_id, status, *, claim_token=None, error_code="", message_id=None):
+        receipt = (message_id if status == 'sent' and isinstance(message_id, str)
+                   and re.fullmatch(r'-?[0-9]{1,20}', message_id) else '')
+        values = (status, error_code, receipt, time.time() if receipt else None, reply_id)
+        update = "UPDATE deliveries SET status=?,error_code=?,claim_token='',receipt_message_id=?,receipt_at=? WHERE reply_id=? "
+        with self.db() as db:
+            if claim_token is None:
+                # Internal callers can supply a receipt for a prepared reply.
+                changed = db.execute(
+                    update + "AND status IN ('prepared','authorized')", values)
+            else:
+                # The bridge can cancel before claiming, or finish its own claim.
+                changed = db.execute(
+                    update + "AND ((status='authorized' AND claim_token=? AND ?!='send_authorization_denied') "
+                    "OR (status='prepared' AND ?='cancelled' AND ?=''))",
+                    (*values, claim_token, error_code, status, claim_token))
+            return bool(changed.rowcount)
 
     def cloud_budget(self, limit: int) -> dict:
         """Read the same account-wide UTC counter used by consume; no mutation."""
@@ -229,6 +322,7 @@ class Engine:
         self.trajectories = self.memory.trajectories
         (root / "data").mkdir(parents=True,exist_ok=True,mode=0o700)
         self.ledger = Ledger(root / "data/state.sqlite3")
+        self.local_conversation = LocalConversation(clock=lambda: time.monotonic())
         from .group_voice import GroupVoice
         self.group_voice = GroupVoice(self.ledger)
         if profile_id == "default":
@@ -238,11 +332,16 @@ class Engine:
         self.diagnostics = Diagnostics(root / "data/state.sqlite3")
         self._cloud_failure_count = 0
         self._cloud_retry_after = 0.0
+        self._cloud_failure_code = ''
         self.search_override = None
         initial_settings=read_settings(root)
         self.groups = GroupConversation(data / "group_state.sqlite3",
             max_messages=initial_settings.group_chat_context_messages,
             ttl_seconds=initial_settings.group_chat_context_minutes*60)
+        self.group_queue=GroupQueue()
+        with self.ledger.db() as db:
+            db.execute("UPDATE deliveries SET status='queue_interrupted',mode='none' WHERE profile_id=? AND profile_epoch!=? AND status='queued'",
+                       (self.profile_id,self.profile_epoch))
         self._group_decisions: dict[str, tuple[float, float]] = {}
         self._group_pending: dict[str, dict] = {}
         self._group_failures: dict[str, tuple[int, float]] = {}
@@ -263,6 +362,9 @@ class Engine:
         self.provider_override = None
         self._activity_epoch = ContextVar("xzbot_activity_epoch", default=None)
         self._request_audit_text = ContextVar("xzbot_request_audit_text", default=None)
+        self._message_event_context = ContextVar("xzbot_message_event", default=None)
+        self._group_target_context = ContextVar("xzbot_group_target", default=None)
+        self._execution_budget_context = ContextVar("xzbot_execution_budget", default=None)
         from .group_idle import IdleConversation
         self.idle = IdleConversation(self)
         self.prune_media()
@@ -294,9 +396,10 @@ class Engine:
     def reset_provider_backoff(self):
         self._cloud_failure_count = 0
         self._cloud_retry_after = 0.0
+        self._cloud_failure_code = ''
 
     def provider_failure(self, error, settings):
-        if str(error) == "bot_stopped":
+        if str(error) in {"bot_stopped","activity_state_conflict","conversation_plan_changed","conversation_observed","peer_round_limit"}:
             return
         code = safe_code(error)
         self.diagnostics.record("llm",code)
@@ -306,9 +409,23 @@ class Engine:
         log.warning("provider_failure code=%s",code)
         if code in {"context_budget_exceeded","cloud_budget","context_retry_budget","privacy_context_changed"}:
             return
+        # A rejected plan or generated JSON concerns this answer, not service
+        # availability. Never silence unrelated groups/explicit @ calls for it.
+        if (code == 'conversation_plan_invalid'
+            or code in {prefix+suffix for prefix in ('deepseek','gemini_balance')
+                        for suffix in ('_output_not_json','_output_not_object')}):
+            return
         if settings.provider_mode == "cloud":
             self._cloud_failure_count = min(5,self._cloud_failure_count+1)
             self._cloud_retry_after = time.monotonic()+min(900,30*2**self._cloud_failure_count)
+            self._cloud_failure_code = code
+
+    def _record_cloud_block(self, reply_id, result):
+        if result.get('reason') != 'cloud_backoff':
+            return
+        with self.ledger.db() as db:
+            db.execute('UPDATE deliveries SET error_code=?,retry_after_seconds=? WHERE reply_id=?',
+                (getattr(self,'_cloud_failure_code',''),round(max(0,self._cloud_retry_after-time.monotonic()),1),reply_id))
 
     def provider_success(self, settings):
         if settings.provider_mode == "cloud":
@@ -385,7 +502,11 @@ class Engine:
             provider, model = "mock", "mock"
         if request_kind == "message" and self._request_audit_text.get() is not None:
             request_text = self._request_audit_text.get()
-        if kind in {"group_decision","followup","group_idle"}:
+        event = self._message_event_context.get()
+        if (event and event[:2] == (scope, user) and kind != 'summary'
+                and trigger in {'direct', 'group_observation', 'followup'}):
+            refs['message_event_key'] = event[2]
+        if kind in {"group_decision","followup","group_idle","group_plan"}:
             refs["confidence_threshold"] = settings.group_chat_confidence_threshold
         try:
             return self.trajectories.begin(kind, trigger, scope, user, provider, model, refs, related_id=related_id,
@@ -407,10 +528,21 @@ class Engine:
     async def _complete_traced(self,provider,messages,settings,**kwargs):
         kind=kwargs["kind"]
         if kind in {'group_idle','group_idle_manual'}:
-            from .role_activity import augment
-            messages=augment(self,messages,settings,kwargs)
+            lease=self._group_target_context.set(None)
+            budget_lease=self._execution_budget_context.set(None)
+            try:
+                return await self._complete_idle(provider,messages,settings,kwargs)
+            finally:
+                self._group_target_context.reset(lease)
+                self._execution_budget_context.reset(budget_lease)
         if kind not in {"reply","group_decision","followup"}:
             return await self._complete_traced_once(provider,messages,settings,**kwargs)
+        plan=await group_planning.prepare(self,messages,settings,kwargs)
+        if plan:
+            if plan['action']!='reply':
+                return {'_local_observe':True,'_local_observe_reason':plan['reason'],'text':'','mode':'none','participate':False,'continuation':False}
+            messages=group_planning.inject(self,messages,settings,kwargs,plan)
+        group_planning.budget(self)
         messages=await group_topic.prepare(self,provider,messages,settings,kwargs)
         from . import role_activity, knowledge_lookup
         messages=role_activity.augment(self,messages,settings,kwargs)
@@ -419,7 +551,35 @@ class Engine:
         messages[0]['content']+='\n'+prompt(self.content_root,'knowledge_lookup',settings)
         messages[0]['content']+='\n'+prompt(self.content_root,'history_lookup',settings)
         from .execution import run_dialogue
-        return await run_dialogue(self,provider,messages,settings,kwargs)
+        kwargs['execution_budget']=group_planning.budget(self)
+        answer=await run_dialogue(self,provider,messages,settings,kwargs)
+        if plan:
+            if not self._group_target_current(plan):raise ProviderError('conversation_plan_changed')
+            answer['_participation_plan']=group_planning.public_plan(plan)
+        return answer
+
+    async def _complete_idle(self,provider,messages,settings,kwargs):
+        try:
+            plan=await group_planning.prepare_idle(self,messages,settings,kwargs)
+        except TimeoutError:
+            raise ProviderError('conversation_plan_unavailable') from None
+        if plan['action']!='reply':
+            return {'_local_observe':True,'text':'','mode':'none','participate':False}
+        messages=group_planning.inject(self,messages,settings,kwargs,plan)
+        from .role_activity import augment
+        messages=augment(self,messages,settings,kwargs)
+        from .activity_guard import assess, repair
+        budget=group_planning.budget(self)
+        for attempt in range(2):
+            answer=await self._complete_traced_once(provider,messages,settings,execution=budget,**kwargs)
+            check=assess(self,answer,settings,kwargs,retry=attempt)
+            if not check or check['status']!='conflict':
+                if not self._group_target_current(plan):raise ProviderError('conversation_plan_changed')
+                answer['_participation_plan']=group_planning.public_plan(plan)
+                return answer
+            if attempt or budget.model_calls>=budget.max_model_calls:raise ProviderError('activity_state_conflict')
+            messages=repair(self,messages,settings,kwargs,check)
+            kwargs.update(trace_id=None,related_id=kwargs['refs']['_trace_id'])
 
     async def _search_evidence(self, answer, messages, settings, kwargs):
         refs=kwargs["refs"];parent=refs.pop("_trace_id")
@@ -469,8 +629,9 @@ class Engine:
     async def _complete_traced_once(self, provider, messages, settings, *, kind, trigger, scope, user,
                                refs, trace_id=None, context_generation=None, image_event_id=None, history_events=None,
                                request_text=None,request_kind="message",allow_search=False,allow_knowledge=False,allow_history=False,related_id=None,
-                               execution=None):
+                               execution=None,validate_plan=None):
         generation = self.generation(scope) if context_generation is None else context_generation
+        planned = kind in reply_contract.CHAT_KINDS and self._group_target_context.get() is not None
         config = conversation_config.read(self.content_root)
         example_messages = conversation_config.examples(config) if kind in {"reply", "group_decision", "followup", "group_idle", "group_idle_manual"} else []
         example_tokens = estimate_tokens(example_messages) - 256
@@ -481,16 +642,24 @@ class Engine:
                 messages[0]["content"] += "\n" + example_policy
         refs["begin_dialogs"] = {"pairs": len(example_messages) // 2, "revision": conversation_config.example_revision(config),
                                 "estimated_tokens": example_tokens}
-        if participation_vote.enabled(settings,kind):
+        if not planned and participation_vote.enabled(settings,kind):
             messages=copy.deepcopy(messages)
             vote_prompt=prompt(self.content_root,"participation_vote",settings)
             if vote_prompt not in messages[0]["content"]:
                 messages[0]["content"] += "\n"+vote_prompt
         refs["prompt_prefixes"]={key:prompt(self.content_root,key,settings) for key in ("direct_header","group_header","followup_header","recent_header","current_header")}
         prefixes = dict(refs["prompt_prefixes"])
-        contract = reply_contract.build(settings, kind, tools=[key for key, allowed in
-            (("web_search",allow_search),("knowledge_query",allow_knowledge),("history_query",allow_history)) if allowed])
-        contract_text = prompt(self.content_root,"reply_contract",settings) if contract else None
+        contract_kind = ('group_idle_manual' if kind.startswith('group_idle') else 'reply') if planned else kind
+        current_message_id = None
+        if kind == 'group_plan':
+            data = json.loads(messages[1]['content'][len(prefixes['group_header']):])
+            current_message_id = data.get('current_message', {}).get('message_id')
+            contract = reply_contract.build(settings, kind, idle_plan=current_message_id is None)
+            contract_text = reply_contract.planning_instructions(contract, current_message_id)
+        else:
+            contract = reply_contract.build(settings, contract_kind, tools=[key for key, allowed in
+                (("web_search",allow_search),("knowledge_query",allow_knowledge),("history_query",allow_history)) if allowed])
+            contract_text = prompt(self.content_root,"reply_contract",settings) if contract else None
         render_request = lambda rows: request_context.render(rows,kind=kind,prefixes=prefixes,
             contract=contract,contract_text=contract_text)
         refs["reply_contract"] = contract
@@ -510,11 +679,13 @@ class Engine:
         label_tokens=sum(len(prompt(self.content_root,key,settings).encode("utf-8")) for key in ("earlier_image","image_label"))
         image_tokens = len(candidates)*per_image_tokens + len(failed_metadata)*1024 + (len(candidates)+len(failed_metadata))*label_tokens
         # The database retains original evidence. Only this request is reduced.
-        prepared = fit_context(messages, refs, kind=kind, window_tokens=settings.context_window_tokens,
-                               output_tokens=700 if kind == "summary" else 1200,image_tokens=image_tokens,example_tokens=example_tokens,
-                               render_messages=render_request)
+        fit_options = dict(kind=kind, window_tokens=settings.context_window_tokens,
+                           output_tokens=SUMMARY_OUTPUT_TOKENS if kind == "summary" else 1200,
+                           image_tokens=image_tokens, example_tokens=example_tokens, render_messages=render_request)
+        prepared = fit_context(messages, refs, **fit_options)
         number = trace_id
         parent = related_id
+        context_retry = False
         for attempt in (1, 2):
             cancelled = ("bot_stopped" if not self.is_active() else
                          "privacy_context_changed" if generation != self.generation(scope) else None)
@@ -529,7 +700,7 @@ class Engine:
             if execution is not None:
                 current_refs["execution"] = execution.snapshot(next_call=True)
             if image_event_id is not None and kind in {"reply", "group_decision", "followup"}:
-                current_refs["delivery_event_key"] = hashlib.sha256((scope+"|"+str(image_event_id)).encode()).hexdigest()
+                current_refs["delivery_event_key"] = self.ledger.event_key(scope, str(image_event_id))
             surviving = retained_events(prepared["messages"],current_refs,kind,image_event_id,history_events)
             selected = self.vision.select(scope,surviving,max_images=4) if settings.vision_enabled else []
             # Only images budgeted at entry may be introduced after trimming.
@@ -569,6 +740,8 @@ class Engine:
                 from .history_lookup import valid as history_valid
                 if generation != self.generation(scope) or not recorded or not history_valid(self.memory,scope,user,current_refs):
                     raise ProviderError("privacy_context_changed")
+                if planned and not self._group_target_current(self._group_target_context.get()):
+                    raise ProviderError("conversation_plan_changed")
                 topic=current_refs.get("group_topic",{})
                 if kind=="group_decision" and topic.get("required_for_heat") and not topic.get("injected"):
                     # The topic pass may have failed its gate, or its evidence
@@ -581,16 +754,18 @@ class Engine:
                 if execution is not None and execution.model_calls >= execution.max_model_calls:
                     raise ProviderError("execution_budget_exhausted")
                 if settings.provider_mode == "cloud" and not self.ledger.consume(settings.daily_cloud_requests):
-                    raise ProviderError("context_retry_budget" if attempt == 2 else "cloud_budget")
+                    raise ProviderError("context_retry_budget" if context_retry else "cloud_budget")
                 if execution is not None:
                     execution.consume()
                 provider = provider if provider is not None else self.providers(settings)
-                self.trajectories.called(number)
                 request_messages = attach_images(ordered_messages,selected,current_refs["images"],current_event=image_event_id,labels={key:prompt(self.content_root,key,settings) for key in ("earlier_image","image_label")})
                 # Examples go before actual context only at the transport boundary.
                 # Budgeting, image association and retrieval keep their typed layout.
                 if example_messages:
                     request_messages = [request_messages[0], *copy.deepcopy(example_messages), *request_messages[1:]]
+                sent_inputs = request_context.input_messages(ordered_messages, kind=kind, prefixes=prefixes,
+                    confirmed_plan_keys=current_refs.get('_confirmed_plan_keys', ()))
+                self.trajectories.called(number, input_messages=sent_inputs)
                 answer = await provider.complete(request_messages, **({"summary": True} if kind == "summary" else {}))
                 if isinstance(answer, CompletionResult):
                     self.trajectories.record_usage(number, answer.usage)
@@ -601,16 +776,19 @@ class Engine:
                     raise _GeneratedContextChanged()
                 if not isinstance(answer, dict):
                     raise ProviderError("invalid_reply_object")
-                contract_errors=reply_contract.control_errors(answer,settings,kind)
-                answer=participation_vote.apply(answer,settings,kind)
+                if planned and not self._group_target_current(self._group_target_context.get()):
+                    raise ProviderError("conversation_plan_changed")
+                contract_errors=reply_contract.control_errors(answer,settings,contract_kind)
+                if not planned:answer=participation_vote.apply(answer,settings,kind)
                 from .knowledge_lookup import query as knowledge_query
                 from .history_lookup import query as history_query
-                researching=(allow_history and history_query(answer,kind,settings) is not None) or (allow_search and self._wants_search(answer,kind,settings)) or (allow_knowledge and knowledge_query(answer,kind,settings) is not None)
+                query_kind = "reply" if planned else kind
+                researching=(allow_history and history_query(answer,query_kind,settings) is not None) or (allow_search and self._wants_search(answer,query_kind,settings)) or (allow_knowledge and knowledge_query(answer,query_kind,settings) is not None)
                 if kind == "reply" and not researching and not clean_reply(answer.get("text", "") if isinstance(answer.get("text"), str) else ""):
                     raise ProviderError("empty_reply")
-                if kind not in {"summary","group_topic"}:
+                if kind not in {"summary","group_topic","group_plan"}:
                     raw_response = answer.get("text", "") if isinstance(answer.get("text"),str) else ""
-                    silent = kind in {"group_decision","followup","group_idle"} and (
+                    silent = not planned and kind in {"group_decision","followup","group_idle"} and (
                         answer.get("participate") is False or (kind == "followup" and answer.get("continuation") is False))
                     self.trajectories.record_response(number,"" if (silent and not answer.get("_participation_vote")) or researching else clean_reply(raw_response),
                         source_text=None if (silent and not answer.get("_participation_vote")) or researching else raw_response)
@@ -620,6 +798,11 @@ class Engine:
                 if kind=="group_topic":
                     topic_prefix=refs["prompt_prefixes"]["group_header"]
                     refs["_topic_rows"]=json.loads(prepared["messages"][1]["content"][len(topic_prefix):])["recent_group_messages"]
+                if kind=='group_plan':
+                    prefix=refs['prompt_prefixes']['group_header']
+                    refs['_plan_message_ids']=sorted(group_planning.evidence_ids(json.loads(prepared['messages'][1]['content'][len(prefix):])))
+                    if validate_plan is not None:
+                        return validate_plan(answer, refs)
                 if researching:
                     refs["_prepared_messages"] = prepared["messages"]
                 return answer
@@ -630,24 +813,39 @@ class Engine:
                 if isinstance(exc, ProviderError):
                     self.trajectories.record_usage(number, exc.usage)
                 code = str(exc)
-                status = ("interrupted" if code in {"bot_stopped","privacy_context_changed"} else
-                          "cloud_budget" if code in {"cloud_budget","context_retry_budget"} else "failed")
-                self.trajectories.finish(number,status,error=None if code == "bot_stopped" else exc,
-                    cancellation_reason=self.context_change_reason(scope,generation) if code=="privacy_context_changed" else None)
-                if isinstance(exc,ProviderError) and code == "context_length_exceeded" and attempt == 1 and kind!="group_topic":
-                    # Never retry an identical prompt, a generic 400, an outage,
-                    # or incomplete output. A second attempt gets its own trace.
-                    smaller = fit_retry(prepared["messages"],prepared["refs"],kind=kind,
-                        window_tokens=settings.context_window_tokens,
-                        output_tokens=700 if kind == "summary" else 1200,image_tokens=image_tokens,example_tokens=example_tokens,
-                        render_messages=render_request)
-                    if smaller is not None:
-                        prepared, parent, number = smaller, number, None
+                rejected_plan = validate_plan is not None and isinstance(exc, group_planning.InvalidPlan)
+                if not rejected_plan:
+                    status = ("interrupted" if code in {"bot_stopped","privacy_context_changed"} else
+                              "cloud_budget" if code in {"cloud_budget","context_retry_budget"} else "failed")
+                    self.trajectories.finish(number,status,error=None if code == "bot_stopped" else exc,
+                        cancellation_reason=self.context_change_reason(scope,generation) if code=="privacy_context_changed" else None)
+                if isinstance(exc, ProviderError) and attempt == 1:
+                    retry = None
+                    if code == "context_length_exceeded" and kind != "group_topic":
+                        retry = fit_retry(prepared["messages"], prepared["refs"], **fit_options)
+                        context_retry = True
+                    elif (current_message_id is not None
+                          and execution is not None and execution.model_calls + 1 < execution.max_model_calls):
+                        # Leave room for generation if the corrected plan permits a reply.
+                        feedback = exc.retry_feedback if rejected_plan else None
+                        if code in {"deepseek_output_not_json", "deepseek_empty_content"}:
+                            feedback = "上次输出未能解析。按本轮规划示例只输出一个完整的 JSON 对象。"
+                        if feedback:
+                            retry_messages = copy.deepcopy(prepared["messages"])
+                            retry_messages[0]["content"] += "\n" + feedback
+                            retry = fit_context(retry_messages, prepared["refs"], **fit_options)
+                    if retry is not None and not retry["blocked"]:
+                        prepared, parent, number = retry, number, None
                         continue
                 raise
         raise ProviderError("context_length_exceeded")
 
     async def handle(self, event: Incoming, *, demo: bool = False) -> dict:
+        # Drop before any trace, ledger, image download, activity or history write.
+        if hidden_message(event.text):
+            return {"mode": "none", "text": "", "reason": "message_hidden"}
+        if event.quoted_message and hidden_message(event.quoted_message.text):
+            event = event.model_copy(update={"quoted_message": None})
         original_text = event.text
         if event.images and not event.text.lstrip().startswith("/"):
             # Explicit transport annotation, never an invented picture caption.
@@ -657,11 +855,17 @@ class Engine:
             return {"mode": "none", "text": "", "reason": "bot_stopped"}
         lease = self._activity_epoch.set(state["epoch"])
         audit_lease = self._request_audit_text.set(original_text)
+        event_lease = self._message_event_context.set(None)
+        target_lease = self._group_target_context.set(None)
+        budget_lease = self._execution_budget_context.set(None)
         try:
             return await self._handle(event, demo=demo)
         finally:
             self._activity_epoch.reset(lease)
             self._request_audit_text.reset(audit_lease)
+            self._message_event_context.reset(event_lease)
+            self._group_target_context.reset(target_lease)
+            self._execution_budget_context.reset(budget_lease)
             if event.kind == "group":
                 prefix="onebot" if event.transport=="onebot" else "qq"
                 scope=f"{prefix}:{event.app_id}:{event.kind}:{event.scope_id}"
@@ -674,6 +878,7 @@ class Engine:
         self.prune_media()
         received_at = time.monotonic()
         settings = self.settings()
+        peer_bot = False
         if not self.is_active():
             return {"mode":"none","text":"","reason":"profile_changed"}
         if not demo:
@@ -693,12 +898,10 @@ class Engine:
                 return {"mode": "none", "text": "", "reason": "group_not_allowed"}
             if event.kind == "dm" and (event.user_id not in allowed_dm_users or event.scope_id != event.user_id):
                 return {"mode": "none", "text": "", "reason": "dm_not_allowed"}
-            if event.transport == "onebot":
-                try:
-                    if event.user_id in managed_qq_ids(self.root):
-                        return {"mode": "none", "text": "", "reason": "managed_bot_sender"}
-                except AccountError:
-                    return {"mode": "none", "text": "", "reason": "account_registry_unavailable"}
+            if event.transport == "onebot" and event.user_id in settings.onebot_peer_bot_ids:
+                if event.kind != "group" or event.text.lstrip().startswith(("/", "!", "！")):
+                    return {"mode":"none","text":"","reason":"peer_bot_sender"}
+                peer_bot = True
         prefix = "onebot" if event.transport == "onebot" else "qq"
         scope = f"{prefix}:{event.app_id}:{event.kind}:{event.scope_id}"
         if demo:
@@ -710,12 +913,19 @@ class Engine:
         reply_id = self.ledger.reserve(event, scope, self.profile_id, self.profile_epoch)
         if not reply_id:
             return {"mode": "none", "text": "", "reason": "duplicate_event"}
+        self._message_event_context.set((scope, event.user_id, self.ledger.event_key(scope, event.event_id)))
         if not demo:
-            self.idle.observe(event, scope)
-        if event.activity_only:
+            if peer_bot:
+                self.idle.peer_spoke(scope)
+            else:
+                self.idle.observe(event, scope)
+        if event.activity_only and not event.mention_only:
             self.ledger.mark(reply_id, "activity_observed", "none")
             return {"reply_id":reply_id,"mode":"none","text":"","reason":"activity_observed"}
         group_mode = event.transport == "onebot" and event.kind == "group" and settings.group_chat_enabled
+        if peer_bot and not group_mode:
+            self.ledger.mark(reply_id, "group_chat_disabled", "none")
+            return {"reply_id":reply_id,"scope":scope,"mode":"none","text":"","reason":"group_chat_disabled"}
         if event.unprompted and not group_mode:
             # Listening for authorized memory is independent of volunteering
             # replies. No shared transcript, model request, or reply is created.
@@ -741,8 +951,15 @@ class Engine:
                 return {"reply_id":reply_id,"mode":"none","text":"","reason":"privacy_context_changed"}
         if group_mode:
             try:
-                return await self._handle_group(event,scope,settings,reply_id,demo=demo)
+                return await self._handle_group(event,scope,settings,reply_id,demo=demo,peer_bot=peer_bot)
+            except QueueStopped as exc:
+                with self.ledger.db() as db:
+                    db.execute('UPDATE deliveries SET queue_wait_seconds=? WHERE reply_id=?',
+                               (round(exc.wait_seconds,3),reply_id))
+                return self._finish_group(event,scope,reply_id,
+                    {"mode":"none","text":"","reason":str(exc)},demo=demo)
             except asyncio.CancelledError:
+                self.ledger.mark(reply_id,'queue_interrupted','none')
                 key=(scope,event.user_id)
                 if self._named_candidates.get(key,{}).get("event_id")==event.event_id:
                     self._named_candidates.pop(key,None)
@@ -752,6 +969,7 @@ class Engine:
                 log.error("group_processing_failed reply=%s",reply_id)
                 return self._finish_group(event,scope,reply_id,
                     {"mode":"none","text":"","reason":"group_internal_failure"},demo=demo)
+        self.ledger.record_intake(reply_id, 'direct')
         identity = (scope, event.user_id)
         # A fixed set of striped locks prevents unbounded growth from arbitrary identities.
         lock_key = (hash(identity) % 64,)
@@ -793,6 +1011,7 @@ class Engine:
                     db.execute("UPDATE deliveries SET media_name=?,asset_reference=? WHERE reply_id=?",
                                (Path(result["media_path"]).name,json.dumps(result.pop("asset_reference",None)),reply_id))
             self.ledger.mark(reply_id, result.get("reason","quiet") if result["mode"]=="none" else "demo" if demo else "prepared", result["mode"])
+            self._record_cloud_block(reply_id,result)
             segmented_delivery.plan(self, event, result, demo=demo)
             return result
 
@@ -800,7 +1019,9 @@ class Engine:
         self._context_changes[scope] = (time.monotonic(), reason)
         self.idle.invalidate(scope)
         self.dialogue.clear(scope)
+        self.local_conversation.clear(scope)
         self._scope_generations[scope]=self._scope_generations.get(scope,0)+1
+        self.group_queue.clear(scope)
         self.vision.clear_scope(scope)
         self._name_decisions.pop(scope,None)
         for key in list(self._named_candidates):
@@ -828,7 +1049,9 @@ class Engine:
         self._context_changes = {None:(time.monotonic(), reason)}
         self.idle.invalidate()
         self.dialogue.clear()
+        self.local_conversation.clear()
         self._group_generation += 1
+        self.group_queue.clear()
         self.vision.clear()
         self._name_decisions.clear()
         self._named_candidates.clear()
@@ -855,24 +1078,97 @@ class Engine:
         return dict(cooldown_seconds=settings.group_chat_cooldown_seconds,
                     hour_limit=settings.group_chat_hourly_limit,day_limit=settings.group_chat_daily_limit)
 
+    def _group_observation_gate(self, event, scope, settings, context, *, named=False, heated=False):
+        """Use the same ordinary participation gates for humans and peer bots."""
+        budget = self._group_budget(settings)
+        if heated:
+            budget["cooldown_seconds"] = settings.group_heat_interval_seconds
+        if named:
+            return "", budget, ""
+        last_cutoff, last_at = self._group_decisions.get(scope, (0., 0.))
+        interval = settings.group_heat_interval_seconds if heated else settings.group_chat_decision_interval_seconds
+        if time.monotonic()-last_at < interval:
+            return "decision_cooldown", budget, ""
+        new_messages = sum(row["role"] == "user" and row["at"] > last_cutoff for row in context)
+        if not heated and new_messages < settings.group_chat_min_messages and not re.search(r"[?？]", event.text):
+            return "collecting_context", budget, ""
+        if not self.groups.budget_status(scope, **budget)["allowed"]:
+            return "group_speaking_budget", budget, ""
+        if heated:
+            entry = 'heat_threshold_met'
+        else:
+            entry = 'message_threshold_met' if new_messages >= settings.group_chat_min_messages else 'question_bypass'
+        return "", budget, entry
+
     def _group_allowed_now(self, event: Incoming, *, demo: bool) -> bool:
         settings = self.settings(f"{event.transport}:{event.app_id}:group:{event.scope_id}")
         return self.is_active() and settings.group_chat_enabled and (demo or (
             settings.transport == "onebot" and settings.onebot_enabled and
             settings.onebot_self_id == event.app_id and event.scope_id in settings.onebot_allowed_groups))
 
-    def _finish_group(self, event, scope, reply_id, result, *, demo=False, reservation=None, thread_kind=None, thread_id=None):
+    def _route_group_target(self, event, scope, settings, *, peer_bot=False):
+        """Use only observations received by this character, never a registry."""
+        observation = self._current_message(event)
+        if peer_bot: observation['is_bot'] = True
+        self.local_conversation.observe(scope,observation,self_id=event.app_id,
+            names=getattr(self,'address_names_loader',lambda:[])(),
+            recent=self._group_snapshot(scope,settings)+self._dialogue_context(event,scope,settings))
+        plan = self.local_conversation.resolve_fast(scope,event.event_id)
+        if plan is not None:
+            self._group_target_context.set(plan)
+            if plan['action'] != 'reply': return 'conversation_observed'
+        return ''
+
+    def _group_target_current(self, guard):
+        if guard.get("source")=="private_single_turn":
+            return time.monotonic()<guard["expires_at"] and self.generation(guard["scope"])==guard["generation"]
+        if guard.get('source') in {'idle_timer','manual'}:
+            return (time.monotonic() < guard['expires_at']
+                and self.generation(guard['scope']) == guard['generation']
+                and self.groups.version(guard['scope']) == guard['version']
+                and self.idle.version(guard['scope']) == guard['idle_activity_version'])
+        return not self.groups.opted_out(guard["scope"],guard["user_id"]) and self.local_conversation.valid(guard)
+
+    def target_reply_current(self, reply_id):
+        pending = self._group_pending.get(reply_id)
+        return bool(pending and pending.get("target_guard")
+                    and time.monotonic()-pending["created_at"] < 240
+                    and self._group_target_current(pending["target_guard"]))
+
+    def _repeats_group_bot(self, scope, text, *, peer_bot=False):
+        context = self._group_snapshot(scope, self.settings(scope))
+        if not peer_bot and not any(row.get("is_bot") for row in context):
+            return False
+        previous = [row["text"] for row in context if row["role"] == "assistant" or row.get("is_bot")]
+        previous.extend(row["text"] for row in self._group_pending.values()
+                        if row["scope"] == scope and time.monotonic()-row["created_at"] < 240)
+        return peer_bots.repeats(text, previous)
+
+    def _finish_group(self, event, scope, reply_id, result, *, demo=False, reservation=None, thread_kind=None, thread_id=None, peer_bot=False):
+        target_guard = self._group_target_context.get()
         key=(scope,event.user_id)
         if self._named_candidates.get(key,{}).get("event_id")==event.event_id:
             self._named_candidates.pop(key,None)
         if not self.is_active():
             self.discard_generated_media(result)
             result={"mode":"none","text":"","reason":"profile_changed"}
+        if result.get("mode") != "none" and target_guard and not self._group_target_current(target_guard):
+            self.discard_generated_media(result)
+            result={"mode":"none","text":"","reason":"group_target_changed"}
+        if (result.get("mode") != "none" and (peer_bot or not requests_repeat(event.text))
+            and self._repeats_group_bot(scope, result.get("_context_text", result.get("text", "")), peer_bot=peer_bot)):
+            self.discard_generated_media(result)
+            result={"mode":"none","text":"","reason":"repetitive_reply"}
         result.update(reply_id=reply_id,scope=scope)
         if result.get("mode") == "none":
             self.ledger.mark(reply_id,result.get("reason","quiet"),"none")
+            self._record_cloud_block(reply_id,result)
             return result
-        self.ledger.mark(reply_id,"demo" if demo else "prepared",result["mode"])
+        with self.ledger.db() as db:
+            # Keep the guard requirement durable: missing transient state after
+            # restart must never make a prepared peer reply eligible again.
+            db.execute("UPDATE deliveries SET status=?,mode=?,peer_bot=?,group_target=? WHERE reply_id=?",
+                       ("demo" if demo else "prepared",result["mode"],int(peer_bot),int(bool(target_guard)),reply_id))
         if result.get("media_path"):
             with self.ledger.db() as db:
                 db.execute("UPDATE deliveries SET media_name=?,asset_reference=? WHERE reply_id=?",
@@ -889,11 +1185,33 @@ class Engine:
             user_at=now-max(0,self.groups.clock()-source["at"]) if source else None
             self._group_pending[reply_id] = dict(scope=scope,user_id=event.user_id,self_id=event.app_id,
                 text=context_text,reservation=reservation,created_at=now,thread_kind=thread_kind,
-                thread_id=thread_id,user_text=event.text,event_id=event.event_id,user_at=user_at,mode=result["mode"])
+                thread_id=thread_id,user_text=event.text,event_id=event.event_id,user_at=user_at,mode=result["mode"],reply_to_id=event.reply_to_id,
+                mention_only=event.mention_only,observation=self._current_message(event))
+            if peer_bot:
+                self._group_pending[reply_id]["peer_guard"] = dict(
+                    epoch=self.groups.peer_budget(scope)["epoch"], version=self.groups.version(scope),
+                    generation=self.generation(scope))
+            if target_guard:
+                self._group_pending[reply_id]["target_guard"] = target_guard
             if demo:
                 self.acknowledge(reply_id,"sent",str(-int(reply_id[:12],16)),demo=True)
         segmented_delivery.plan(self, event, result, demo=demo)
+        if not demo:self.group_queue.expect_receipt(reply_id)
         return result
+
+    def peer_reply_current(self, reply_id):
+        """Recheck a staged peer reply at each bridge send authorization."""
+        pending = self._group_pending.get(reply_id)
+        guard = pending.get("peer_guard") if pending else None
+        if not guard or time.monotonic()-pending["created_at"] >= 240:
+            return False
+        scope = pending["scope"]
+        settings = self.settings(scope)
+        return bool(self.is_active() and settings.transport == "onebot" and settings.onebot_enabled
+            and settings.group_chat_enabled and settings.onebot_self_id == pending["self_id"]
+            and scope.rsplit(":",1)[-1] in settings.onebot_allowed_groups
+            and self.generation(scope) == guard["generation"]
+            and self.groups.peer_epoch_current(scope,guard["epoch"]))
 
     def _dialogue_context(self,event,scope,settings):
         if event.kind=="group" and self.groups.opted_out(scope,event.user_id):
@@ -911,11 +1229,22 @@ class Engine:
             self._group_pending.pop(next(iter(self._group_pending)))
         self._group_pending[reply_id]=dict(scope=scope,user_id=event.user_id,self_id=event.app_id,
             text=text,mode=mode,reservation=None,created_at=now,user_at=received_at,
-            user_text=event.text,event_id=event.event_id,dialogue_only=True)
+            user_text=event.text,event_id=event.event_id,dialogue_only=True,reply_to_id=event.reply_to_id,
+            mention_only=event.mention_only,observation=self._current_message(event))
 
-    def acknowledge(self, reply_id: str, status: str, message_id: str | None = None, *, demo=False):
-        if not demo:
-            self.ledger.mark(reply_id,status)
+    def acknowledge(self, reply_id: str, status: str, message_id: str | None = None, *,
+                    demo=False, claim_token=None, error_code=""):
+        if demo or self.ledger.accept_receipt(reply_id, status, claim_token=claim_token,
+                                             error_code=error_code, message_id=message_id):
+            self._apply_reply_receipt(reply_id,status,message_id)
+
+    def _apply_reply_receipt(self, reply_id, status, message_id=None):
+        try:
+            self._acknowledge(reply_id,status,message_id)
+        finally:
+            self.group_queue.settle(reply_id)
+
+    def _acknowledge(self, reply_id: str, status: str, message_id: str | None = None):
         pending = self._group_pending.pop(reply_id,None)
         if not self.is_active():
             return
@@ -925,6 +1254,11 @@ class Engine:
                 self._group_threads.pop(key,None)
         if not pending or status != "sent" or not message_id or time.monotonic()-pending["created_at"]>=240:
             return
+        from .quote_origins import remember
+        for sent_id,_ in pending.get('confirmed_segments',[(message_id,pending['text'])]):
+            remember(self,pending,sent_id)
+        target_guard = pending.get("target_guard")
+        target_current = not target_guard or self._group_target_current(target_guard)
         if pending.get("dialogue_only") or pending.get("thread_kind") in {"start","continue"}:
             self.dialogue.add(pending,message_id)
         if pending.get("dialogue_only"):
@@ -936,9 +1270,14 @@ class Engine:
         # shared transcript. An uncertain send is never presented as a fact.
         for sent_id, sent_text in pending.get("confirmed_segments", [(message_id, pending["text"])]):
             self.groups.add(pending["scope"],pending["self_id"],sent_text,sent_id,
-                            display_name="自己",role="assistant")
+                            display_name="自己",role="assistant",response_to_message_id=pending['event_id'])
+            self.local_conversation.observe(pending['scope'],dict(kind='group',message_id=sent_id,
+                user_id=pending['self_id'],text=sent_text,role='assistant',
+                response_to_message_id=pending['event_id'],display_name='自己',
+                relation_active=target_current),self_id=pending['self_id'])
         self.idle.bot_spoke(pending["scope"])
-        self._acknowledge_thread(pending,message_id)
+        if target_current:
+            self._acknowledge_thread(pending,message_id)
 
     def _active_thread(self,scope,user,settings):
         now=time.monotonic()
@@ -1002,18 +1341,55 @@ class Engine:
         now=time.monotonic()
         return [dict(m,age_seconds=max(0,int(now-m["at"]))) for m in thread["messages"]]
 
+    def _related_members(self,event,scope):
+        if event.kind != 'group':return []
+        candidates=list(event.mentioned_user_ids or [])
+        quoted=event.quoted_message
+        if quoted and not hidden_message(quoted.text):candidates.append(quoted.user_id)
+        excluded={event.user_id,event.app_id}
+        if event.transport == 'onebot':
+            excluded.update(self.settings(scope).onebot_peer_bot_ids)
+        return [user for user in dict.fromkeys(candidates) if user not in excluded
+                and not self.groups.opted_out(scope,user)][:1]
+
+    @staticmethod
+    def _member_label(value):
+        label="".join(char for char in value if ord(char)>=32)[:80].strip()
+        return "（昵称已隐藏）" if GroupConversation.contains_credentials(label) else label
+
     def _current_message(self,event):
         result = dict(kind=event.kind,message_id=event.event_id,user_id=event.user_id,text=event.text,
                     has_images=bool(event.images),image_count=len(event.images),reply_to_id=event.reply_to_id)
+        result["sender"]={"user_id":event.user_id,"display_name":self._member_label(event.display_name)}
+        if event.mention_only:result['mention_only']=True
+        scope=f'{event.transport}:{event.app_id}:{event.kind}:{event.scope_id}'
+        if event.transport == 'onebot':
+            result.update(bot_user_id=event.app_id,mentioned=event.mentioned,other_mentioned=event.other_mentioned,
+                mention_metadata_available=event.mentioned_user_ids is not None,
+                mentions_everyone=event.mentions_everyone,mentions=[])
+            labels={member.user_id:self._member_label(member.display_name) for member in event.mentioned_members}
+            for user in event.mentioned_user_ids or []:
+                label=labels.get(user,"")
+                source="group_member_info" if label else "unavailable"
+                if not label and event.kind == 'group':
+                    known=self.groups.familiarity(scope,user)
+                    if known and known.get('display_name'):
+                        label=self._member_label(known['display_name']);source="recent_group"
+                result['mentions'].append(dict(user_id=user,display_name=label,name_source=source,is_self=user==event.app_id))
         if event.reply_to_id:
             result['quote_status'] = 'unavailable'
             quoted = event.quoted_message
             scope = f'{event.transport}:{event.app_id}:{event.kind}:{event.scope_id}'
-            if (quoted and not GroupConversation.contains_credentials(quoted.text)
+            if (quoted and not hidden_message(quoted.text)
+                    and not GroupConversation.contains_credentials(quoted.text)
                     and not self.groups.opted_out(scope,quoted.user_id)
                     and self.memory.collection_source(scope,quoted.user_id) != 'member_disabled'):
                 result['quoted_message'] = quoted.model_dump() | {'role':'assistant' if quoted.user_id==event.app_id else 'user'}
                 result['quote_status'] = 'resolved'
+        if event.reply_to_id:
+            from .quote_origins import resolve
+            origin=resolve(self,event)
+            if origin is not None:result['quote_origin']=origin
         return result
 
     def _acknowledge_thread(self,pending,message_id):
@@ -1040,7 +1416,8 @@ class Engine:
         thread.pop('handoff',None);thread.pop('handoff_state',None)
         if pending.get("user_at") is not None:
             thread["messages"].append({"role":"user","user_id":user,"message_id":pending["event_id"],
-                                       "text":pending["user_text"],"at":pending["user_at"]})
+                                       "text":pending["user_text"],"at":pending["user_at"],
+                                       **({'mention_only':True} if pending.get('mention_only') else {})})
         thread["messages"].append(
             {"role":"assistant","user_id":pending["self_id"],"message_id":message_id,"text":pending["text"],"mode":pending.get("mode","text"),"at":now})
         thread["messages"]=[m for m in thread["messages"][-12:] if now-m["at"]<settings.group_chat_context_minutes*60]
@@ -1054,8 +1431,8 @@ class Engine:
         context_generation = self.generation(scope)
         current=lambda: (self._group_allowed_now(event,demo=demo)
                         and context_generation==self.generation(scope)
-                        and self.groups.is_latest_user_event(scope,event.user_id,event.event_id)
-                        and self._handoff_current(event,scope,thread)
+                        and (self._group_target_current(self._group_target_context.get()) if self._group_target_context.get() else
+                             self.groups.is_latest_user_event(scope,event.user_id,event.event_id) and self._handoff_current(event,scope,thread))
                         and self._active_thread(scope,event.user_id,self.settings(scope)) is thread)
         if not current():
             return quiet("followup_policy_changed")
@@ -1081,8 +1458,9 @@ class Engine:
             if hint is None:
                 return quiet('followup_policy_changed')
             thread['handoff']=hint
-        own_memories = self.memory.retrieve(scope,event.user_id,event.text)
         dialogue=self._dialogue_context(event,scope,settings)
+        from .member_context import select as member_context
+        own_memories = member_context(self.memory,scope,event.user_id,event.text,recent=list(context)+list(dialogue),related_users=self._related_members(event,scope))
         messages=self._group_prompt(event,scope,settings,context,trace=trace_data,memories=own_memories,dialogue=dialogue)
         messages[0]["content"] += prompt(self.content_root,"group_handoff" if 'handoff' in thread else "followup",settings)
         if 'handoff' in thread:
@@ -1120,19 +1498,14 @@ class Engine:
         self._group_failures.pop(scope,None)
         if not current():
             return quiet("followup_policy_changed")
-        if answer.get("_voting_invalid"):
-            return quiet("voting_invalid")
-        if answer.get("_participation_vote") and answer.get("continuation") is True and answer.get("participate") is not True:
-            return quiet("followup_low_confidence")
-        if not isinstance(answer,dict) or answer.get("continuation") is not True or answer.get("participate") is not True:
+        if answer.get('_local_observe'):
+            if answer.get('_local_observe_reason')=='below_participation_threshold':
+                return quiet('followup_low_confidence')
             self._group_threads.pop(key,None)
             self.dialogue.end_followup(scope,event.user_id)
-            return quiet("followup_not_for_bot")
-        confidence=answer.get("confidence")
-        if type(confidence) not in (int,float) or not 0<=confidence<=1:
-            return quiet("followup_confidence_invalid")
-        if confidence<settings.group_chat_confidence_threshold:
-            return quiet("followup_low_confidence")
+            return quiet('conversation_observed')
+        if not answer.get('_participation_plan'):
+            return quiet('conversation_plan_invalid')
         response=clean_reply(answer.get("text","") if isinstance(answer.get("text"),str) else "")
         if not response or len(response)>settings.group_chat_max_reply_chars:
             return quiet("invalid_group_reply")
@@ -1153,13 +1526,143 @@ class Engine:
         return self._finish_group(event,scope,reply_id,result,demo=demo,
                                   thread_kind="continue",thread_id=thread["id"])
 
-    async def _handle_group(self, event, scope, settings, reply_id, *, demo=False):
+    async def _handle_peer_group(self, event, scope, settings, reply_id, *, demo=False):
+        """Locally observed peer turns, bounded until another human speaks."""
+        def quiet(reason):
+            return self._finish_group(event,scope,reply_id,{"mode":"none","text":"","reason":reason},demo=demo,peer_bot=True)
+        if len(event.text) > settings.max_input_chars:
+            return quiet("observation_excluded")
+        version = self.groups.add(scope,event.user_id,event.text,event.event_id,
+                                  display_name=event.display_name,is_bot=True,observation=self._current_message(event))
+        self.ledger.record_intake(reply_id, 'peer_observation', window_entered=version is not None)
+        if version is None:
+            return quiet("observation_excluded")
+        target_reason=self._route_group_target(event,scope,settings,peer_bot=True)
+        if target_reason:return quiet(target_reason)
+        if not settings.group_chat_peer_echo_enabled or not self.groups.peer_budget(scope)['allowed']:
+            return quiet('peer_round_limit')
+        generation = self.generation(scope)
+        state = self.groups.peer_budget(scope)
+        epoch = state["epoch"]
+        current = lambda: (self._group_allowed_now(event,demo=demo)
+                           and generation == self.generation(scope)
+                           and self.groups.peer_epoch_current(scope,epoch)
+                           and (not self._group_target_context.get() or self._group_target_current(self._group_target_context.get())))
+        if event.images and settings.vision_enabled:
+            await self.vision.prepare(scope,event.user_id,event.event_id,event.images)
+            if not current():
+                return quiet("privacy_context_changed")
+        context = self._group_snapshot(scope,settings)
+        quoted_self = bool(event.reply_to_id and (
+            any(row["role"] == "assistant" and row["message_id"] == event.reply_to_id for row in context)
+            or (event.quoted_message and event.quoted_message.user_id == event.app_id)))
+        async with self.groups.lock(scope):
+            if not current():
+                return quiet("context_changed_during_generation")
+            if (time.monotonic() < self._group_failures.get(scope,(0,0.))[1]
+                or (settings.provider_mode == "cloud" and time.monotonic() < self._cloud_retry_after)):
+                return quiet("cloud_backoff")
+            shortcut = settings.group_chat_peer_echo_enabled and self.groups.peer_budget(scope)["allowed"]
+            context = self._group_snapshot(scope,settings)
+            heat = self.groups.heat(scope,settings)
+            heated = not shortcut and heat["eligible"] and self.groups.recent_user_event(scope,event.user_id,event.event_id)
+            if shortcut:
+                entry = 'peer_turn_available'
+                budget = self._group_budget(settings)
+                budget["cooldown_seconds"] = settings.group_followup_min_interval_seconds
+                pacing = self.groups.budget_status(scope,**budget)
+                if pacing["reason"] == "cooldown":
+                    await asyncio.sleep(min(pacing["retry_after"],settings.group_followup_min_interval_seconds))
+            else:
+                reason, budget, entry = self._group_observation_gate(event,scope,settings,context,heated=heated)
+                if reason:
+                    return quiet(reason)
+            if not current():
+                return quiet("context_changed_during_generation")
+            if not self.groups.budget_status(scope,**budget)["allowed"]:
+                return quiet("group_speaking_budget")
+            self.ledger.record_intake(reply_id, 'peer_observation', reason=entry)
+            last_cutoff, _ = self._group_decisions.get(scope,(0.,0.))
+            decision_started = time.monotonic()
+            def candidate_current(*, check_heat_budget=False):
+                if not current():
+                    return False
+                if shortcut:
+                    return True
+                if (time.monotonic()-decision_started > (15 if heated else 45)
+                    or not self.groups.recent_user_event(scope,event.user_id,event.event_id)):
+                    return False
+                return not heated or not check_heat_budget or self.groups.heat(scope,settings)["eligible"]
+            if not shortcut:
+                self._group_decisions[scope] = (time.time(),decision_started)
+                if len(self._group_decisions)>128:
+                    self._group_decisions.pop(next(iter(self._group_decisions)))
+            try:
+                async with self._capacity:
+                    if not current():
+                        return quiet("context_changed_during_generation")
+                    trace_data = {}
+                    if not shortcut:
+                        policy = self.confidence_policy(scope,settings)
+                        trace_data["confidence_policy"] = policy
+                        settings = settings.model_copy(update={"group_chat_confidence_threshold":policy["effective"]})
+                    context = self._group_snapshot(scope,settings)
+                    messages = self._group_prompt(event,scope,settings,context,trace=trace_data,
+                                                  memories=[],dialogue=[],peer_bot=True,heat=heat if heated else None)
+                    answer = await self._complete_traced(None,messages,settings,kind="group_decision",
+                        trigger="group_observation",scope=scope,user=event.user_id,refs=trace_data,
+                        context_generation=generation,image_event_id=event.event_id,request_text=event.text)
+            except ProviderError as exc:
+                self.provider_failure(exc,settings)
+                if str(exc) in LOCAL_STOP_REASONS:
+                    return quiet(str(exc))
+                failures = min(5,self._group_failures.get(scope,(0,0.))[0]+1)
+                self._group_failures[scope] = (failures,time.monotonic()+min(900,30*2**failures))
+                return quiet("decision_unavailable")
+            except (ValueError,TypeError):
+                return quiet("decision_unavailable")
+            if answer.get("_topic_blocked") is True:
+                return quiet("heat_topic_not_ready")
+            self.provider_success(settings)
+            self._group_failures.pop(scope,None)
+            if not candidate_current(check_heat_budget=True):
+                if not shortcut and self._group_allowed_now(event,demo=demo) and generation == self.generation(scope):
+                    self._group_decisions[scope] = (last_cutoff,decision_started)
+                return quiet("context_changed_during_generation")
+            if answer.get('_local_observe'):
+                return quiet('low_confidence' if answer.get('_local_observe_reason')=='below_participation_threshold' else 'conversation_observed')
+            if not answer.get('_participation_plan'):
+                return quiet('conversation_plan_invalid')
+            response = clean_reply(answer.get("text", "") if isinstance(answer.get("text"),str) else "")
+            if not response or len(response) > settings.group_chat_max_reply_chars:
+                return quiet("invalid_group_reply")
+            if self._repeats_group_bot(scope,response,peer_bot=True):
+                return quiet("repetitive_reply")
+            # Every peer reply spends this character's local round allowance.
+            if not self.groups.reserve_peer_reply(scope,epoch):
+                return quiet("context_changed_during_generation")
+            reservation = self.groups.reserve(scope,heat_limit=settings.group_heat_max_replies if heated else None,**budget)
+            if not reservation:
+                return quiet("group_speaking_budget")
+            result = await self._render_reply(event,scope,settings,answer,response,trace_data,
+                trigger="group_observation",context_generation=generation,valid=candidate_current)
+            if not candidate_current():
+                self.discard_generated_media(result)
+                return quiet("context_changed_during_generation")
+            # No human dialogue window or long-term member memory is created.
+            return self._finish_group(event,scope,reply_id,result,demo=demo,
+                                      reservation=reservation,peer_bot=True)
+
+    async def _handle_group(self, event, scope, settings, reply_id, *, demo=False, peer_bot=False):
+        if peer_bot:
+            return await self._handle_peer_group(event,scope,settings,reply_id,demo=demo)
         def quiet(reason):
             return self._finish_group(event,scope,reply_id,{"mode":"none","text":"","reason":reason},demo=demo)
         command = event.text.strip().split(maxsplit=1)[0] if event.text.strip() else ""
         if event.text.strip() in {"/旁听 关闭","/记忆 关闭","/忘记我"}:
             # Privacy withdrawal must invalidate an in-flight decision now, not
             # queue behind a potentially slow cloud call holding the group lock.
+            self.ledger.record_intake(reply_id, 'command')
             owner=settings.is_owner(event.kind,event.scope_id,event.user_id,event.transport)
             answer=self.command(event,scope,event.text.strip(),owner)
             identity=(scope,event.user_id)
@@ -1167,11 +1670,12 @@ class Engine:
                 return quiet("rate_limited")
             self._last[identity]=time.monotonic()
             return self._finish_group(event,scope,reply_id,{"mode":"text","text":answer},demo=demo)
+        arrival_generation=self.generation(scope)
         previous = self._group_snapshot(scope,settings)
         quoted_bot = bool(event.reply_to_id and (any(r["role"]=="assistant" and r["message_id"]==event.reply_to_id for r in previous)
                          or (event.quoted_message and event.quoted_message.user_id==event.app_id)))
         direct = not event.unprompted or event.mentioned or command in GROUP_COMMANDS or quoted_bot
-        addressed_elsewhere=not direct and (event.other_mentioned or (event.reply_to_id and not quoted_bot))
+        addressed_elsewhere=False
         named = (not direct and not addressed_elsewhere
                  and is_addressed(event.text,getattr(self,"address_names_loader",lambda:[])()))
         now=time.monotonic();name_key=(scope,event.user_id)
@@ -1197,35 +1701,55 @@ class Engine:
             self._group_threads.pop((scope,event.user_id),None)
             self.dialogue.end_followup(scope,event.user_id)
         version = None
+        target_reason = ""
         # Commands and suspected credentials never enter the shared transcript.
         if command not in GROUP_COMMANDS and len(event.text)<=settings.max_input_chars:
-            version = self.groups.add(scope,event.user_id,event.text,event.event_id,display_name=event.display_name)
-            if (event.images and settings.vision_enabled and (version is not None or direct)
-                and len(event.text)<=settings.max_input_chars and not GroupConversation.contains_credentials(event.text)
-                and not event.text.lstrip().startswith("/")):
-                privacy_generation=self.generation(scope)
-                await self.vision.prepare(scope,event.user_id,event.event_id,event.images)
-                if privacy_generation!=self.generation(scope) or not self._group_allowed_now(event,demo=demo):
-                    return quiet("privacy_context_changed")
+            version = self.groups.add(scope,event.user_id,event.text,event.event_id,display_name=event.display_name,
+                                      mention_only=event.mention_only,observation=self._current_message(event))
             if version is not None:
-                self.memory.add_history(scope,event.user_id,"user",event.text,event.event_id)
-                if self.memory.consent(scope,event.user_id):
-                    member_lock = self._locks.setdefault((hash((scope,event.user_id))%64,),asyncio.Lock())
-                    async with member_lock, self._capacity:
-                        if (self._group_allowed_now(event,demo=demo) and not self.groups.opted_out(scope,event.user_id)
-                            and self.memory.consent(scope,event.user_id)):
-                            await self.summarize(scope,event.user_id,None,settings)
+                target_reason = self._route_group_target(event,scope,settings)
+                plan=self._group_target_context.get()
+                direct = direct or bool(plan and plan["action"]=="reply" and plan["target"]=="self")
+                addressed_elsewhere = bool(target_reason)
+        if target_reason:
+            path = 'local_plan'
+        elif command in GROUP_COMMANDS and command not in {'/文字', '/语音'}:
+            path = 'command'
+        else:
+            path = 'named' if named else 'direct' if direct else 'group_observation'
+        self.ledger.record_intake(reply_id, path, window_entered=version is not None)
+        if (command not in GROUP_COMMANDS and event.images and settings.vision_enabled and (version is not None or direct)
+            and len(event.text)<=settings.max_input_chars and not GroupConversation.contains_credentials(event.text)
+            and not event.text.lstrip().startswith("/")):
+            privacy_generation=self.generation(scope)
+            await self.vision.prepare(scope,event.user_id,event.event_id,event.images)
+            if privacy_generation!=self.generation(scope) or not self._group_allowed_now(event,demo=demo):
+                return quiet("privacy_context_changed")
+        if version is not None and event.text.strip():
+            self.memory.add_history(scope,event.user_id,"user",event.text,event.event_id)
+        if target_reason:
+            self._group_threads.pop((scope,event.user_id),None)
+            self.dialogue.end_followup(scope,event.user_id)
+            return quiet(target_reason)
         if addressed_elsewhere:
             return quiet("followup_not_for_bot")
-        debounced_current=True
-        if not direct:
-            if version is None:
-                return quiet("observation_excluded")
-            if not named:
-                debounced_current=await self.groups.debounced(scope,version,settings.group_chat_debounce_seconds)
-        async with self.groups.lock(scope):
+        if not direct and version is None:
+            return quiet("observation_excluded")
+        self.ledger.mark(reply_id,'queued','none')
+        async with self.group_queue.turn(scope,event.user_id,reply_id,replaceable=not direct and not named,
+                                         lock=self.groups.lock(scope)) as queued:
+            with self.ledger.db() as db:
+                db.execute("UPDATE deliveries SET status='processing',queue_wait_seconds=? WHERE reply_id=?",
+                           (round(queued.wait_seconds,3),reply_id))
+            if arrival_generation!=self.generation(scope):
+                return quiet('queue_context_changed')
+            if not direct and not named and settings.group_chat_debounce_seconds:
+                await asyncio.sleep(settings.group_chat_debounce_seconds)
             if not self._group_allowed_now(event,demo=demo):
                 return quiet("group_policy_changed")
+            target_guard = self._group_target_context.get()
+            if target_guard and not self._group_target_current(target_guard):
+                return quiet("group_target_changed")
             heat=self.groups.heat(scope,settings)
             heated=not named and not direct and not addressed_elsewhere and heat["eligible"] and self.groups.recent_user_event(scope,event.user_id,event.event_id)
             # Re-read after debounce AND lock acquisition: an earlier reply's
@@ -1247,16 +1771,28 @@ class Engine:
                     thread=dict(id=uuid.uuid4().hex,born=now,expires=now+settings.group_followup_seconds,
                         turns=0,last_attempt=0.,messages=recent,generation_at=now,pending=None)
                     self._group_threads[(scope,event.user_id)]=thread
-            if not direct:
+            if not direct and not named:
                 latest=(self.groups.is_latest_user_event(scope,event.user_id,event.event_id)
-                        if thread or named or heated else self.groups.is_current(scope,version))
+                        and self.groups.recent_user_event(scope,event.user_id,event.event_id))
                 if not latest:
-                    return quiet("merged_into_newer_event" if not debounced_current else "superseded")
+                    return quiet("queue_merged")
             if named and self.groups.opted_out(scope,event.user_id):
                 return quiet("observation_excluded")
             if direct:
                 privacy_generation=self.generation(scope)
                 identity=(scope,event.user_id)
+                if named:
+                    interval=settings.group_followup_min_interval_seconds
+                    pacing=self.groups.budget_status(scope,cooldown_seconds=interval,hour_limit=10000,day_limit=10000)
+                    delay=min(interval,max(0.,self._name_decisions.get(scope,0.)+interval-time.monotonic(),
+                        pacing['retry_after'] if pacing['reason']=='cooldown' else 0.))
+                    if delay:await asyncio.sleep(delay)
+                    if (privacy_generation!=self.generation(scope) or not self._group_allowed_now(event,demo=demo)
+                            or self.groups.opted_out(scope,event.user_id)
+                            or self._group_target_context.get() and not self._group_target_current(self._group_target_context.get())):
+                        return quiet('conversation_plan_changed')
+                    self._name_decisions[scope]=time.monotonic()
+                    if len(self._name_decisions)>128:self._name_decisions.pop(next(iter(self._name_decisions)))
                 if not demo and time.monotonic()-self._last.get(identity,0)<settings.min_interval_seconds:
                     return quiet("rate_limited")
                 self._last[identity]=time.monotonic()
@@ -1279,8 +1815,9 @@ class Engine:
                 generated=result.pop("_generated",False)
                 return self._finish_group(event,scope,reply_id,result,demo=demo,thread_kind="start" if generated else None)
             if thread:
+                self.ledger.record_intake(reply_id, 'followup')
                 return await self._continue_group_thread(event,scope,settings,reply_id,thread,demo=demo)
-            last_cutoff,last_at=self._group_decisions.get(scope,(0.,0.))
+            last_cutoff,_=self._group_decisions.get(scope,(0.,0.))
             if time.monotonic()<self._group_failures.get(scope,(0,0.))[1] or (settings.provider_mode=="cloud" and time.monotonic()<self._cloud_retry_after):
                 return quiet("cloud_backoff")
             context_generation = self.generation(scope)
@@ -1302,18 +1839,12 @@ class Engine:
                     await asyncio.sleep(delay)
                 if not named_current():
                     return quiet("superseded")
-            interval=settings.group_heat_interval_seconds if heated else settings.group_chat_decision_interval_seconds
-            if not named and time.monotonic()-last_at<interval:
-                return quiet("decision_cooldown")
             context=self._group_snapshot(scope,settings)
-            new_messages=sum(r["role"]=="user" and r["at"]>last_cutoff for r in context)
-            if not named and not heated and new_messages<settings.group_chat_min_messages and not re.search(r"[?？]",event.text):
-                return quiet("collecting_context")
-            budget=self._group_budget(settings)
-            if heated:
-                budget["cooldown_seconds"]=settings.group_heat_interval_seconds
-            if not named and not self.groups.budget_status(scope,**budget)["allowed"]:
-                return quiet("group_speaking_budget")
+            reason, budget, entry = self._group_observation_gate(event,scope,settings,context,named=named,heated=heated)
+            if heated or entry:
+                self.ledger.record_intake(reply_id, 'heated' if heated else 'group_observation', reason=entry)
+            if reason:
+                return quiet(reason)
             decision_started=time.monotonic()
             if not named:
                 self._group_decisions[scope]=(time.time(),decision_started)
@@ -1348,6 +1879,9 @@ class Engine:
             except ProviderError as exc:
                 if str(exc) in LOCAL_STOP_REASONS:
                     self.provider_failure(exc,settings)
+                    if (str(exc)=='conversation_plan_changed' and self._group_allowed_now(event,demo=demo)
+                            and context_generation==self.generation(scope)):
+                        self._group_decisions[scope]=(last_cutoff,decision_started)
                     return quiet("context_changed_during_generation" if isinstance(exc,_GeneratedContextChanged) else str(exc))
                 self.provider_failure(exc,settings)
                 failures=min(5,self._group_failures.get(scope,(0,0.))[0]+1)
@@ -1362,10 +1896,15 @@ class Engine:
             self.provider_success(settings)
             self._group_failures.pop(scope,None)
             def candidate_current(*, check_heat_budget=False):
+                plan=self._group_target_context.get()
+                if plan is not None:
+                    return time.monotonic()-decision_started <= (15 if heated else 45) and self._group_target_current(plan)
                 if named:
                     return named_current()
                 if not heated:
-                    return self.groups.is_current(scope,version)
+                    return (time.monotonic()-decision_started<=45
+                        and self.groups.is_latest_user_event(scope,event.user_id,event.event_id)
+                        and self.groups.recent_user_event(scope,event.user_id,event.event_id))
                 # A hot room may keep speaking while a short reply is generated.
                 # Only a fresh, unreplaced anchor survives; privacy invalidation
                 # and the generation guard are checked independently below.
@@ -1385,13 +1924,10 @@ class Engine:
                 if self._group_allowed_now(event,demo=demo) and context_generation==self.generation(scope):
                     self._group_decisions[scope]=(last_cutoff,decision_started)
                 return quiet("context_changed_during_generation")
-            if answer.get("_voting_invalid"):
-                return quiet("voting_invalid")
-            if not isinstance(answer,dict) or answer.get("participate") is not True:
-                return quiet("low_confidence" if answer.get("_participation_vote") else "chose_silence")
-            confidence=answer.get("confidence")
-            if type(confidence) not in (int,float) or not settings.group_chat_confidence_threshold<=confidence<=1:
-                return quiet("low_confidence")
+            if answer.get('_local_observe'):
+                return quiet('low_confidence' if answer.get('_local_observe_reason')=='below_participation_threshold' else 'conversation_observed')
+            if not answer.get('_participation_plan'):
+                return quiet('conversation_plan_invalid')
             response=clean_reply(answer.get("text","") if isinstance(answer.get("text"),str) else "")
             if not response or len(response)>settings.group_chat_max_reply_chars:
                 return quiet("invalid_group_reply")
@@ -1420,28 +1956,32 @@ class Engine:
         return all(self.memory.collection_source(scope,user)!="member_disabled" and not self.groups.opted_out(scope,user)
                    for user in users)
 
-    def _group_prompt(self,event,scope,settings,context,*,trace=None,memories=None,addressed=False,heat=None,dialogue=None):
+    def _group_prompt(self,event,scope,settings,context,*,trace=None,memories=None,addressed=False,heat=None,dialogue=None,peer_bot=False):
         policy=prompt(self.content_root,"group",settings)
-        policy += "\n" + "\n".join(prompt(self.content_root,key,settings) for key in ("knowledge","expression","vision","output","style","dialogue","conversation_target"))
-        memories = self.memory.retrieve(scope,event.user_id,event.text) if memories is None else memories
+        policy += "\n" + "\n".join(prompt(self.content_root,key,settings) for key in ("knowledge","member_memory","member_context_use","quoted_origin","expression","vision","output","style","dialogue","conversation_target"))
+        dialogue=self._dialogue_context(event,scope,settings) if dialogue is None else dialogue
+        from .member_context import select as member_context
+        memories = member_context(self.memory,scope,event.user_id,event.text,recent=list(context)+list(dialogue),related_users=self._related_members(event,scope)) if memories is None else memories
         knowledge = lore.for_prompt(self.content_root,event.text)
         persona = (self.content_root/"content/persona.md").read_text()
         expressions = assets.catalog(self.content_root,event.text)
-        dialogue=self._dialogue_context(event,scope,settings) if dialogue is None else dialogue
         data={"confirmed_direct_dialogue":dialogue,"current_message":self._current_message(event),
               "available_expressions":expressions,"recent_group_messages":context,"latest_speaker_id":event.user_id,
               "latest_speaker_familiarity":self.groups.familiarity(scope,event.user_id),
               "latest_speaker_own_memories":memories,
               "lore":knowledge}
+        if peer_bot:
+            data["current_message"]["is_bot"] = True
         if heat is not None:
             data["group_activity"]=heat
             policy += "\n"+prompt(self.content_root,"heat",settings)
         names=getattr(self,"address_names_loader",lambda:[])()
-        if addressed or is_addressed(event.text,names):
+        if not peer_bot and (addressed or is_addressed(event.text,names)):
             data["addressed_candidate"]={"user_id":event.user_id,"message_id":event.event_id,"text":event.text}
             policy += prompt(self.content_root,"addressed",settings)
         if trace is not None:
             trace.update(trace_references(memories=memories,knowledge=knowledge,persona=persona,
+                                          quote_origin=data['current_message'].get('quote_origin'),
                                           group_context=context,dialogue=dialogue,input_characters=len(event.text),source_event_id=event.event_id,expressions=expressions))
             trace["_text_preview_allowed"] = self._preview_context_allowed(scope,context)
             if heat is not None:trace["group_activity"]=heat
@@ -1468,25 +2008,29 @@ class Engine:
         mode_override = "voice" if text.startswith("/语音 ") else "text" if text.startswith("/文字 ") else None
         if mode_override:
             text = text[4:].strip()
-        if not text:
+        if not text and not event.mention_only:
             return {"mode": "none", "text": ""}
         if not self.is_active():
             return {"mode":"none","text":"","reason":"profile_changed"}
         # Observation is independent of a successful cloud response. Consent,
         # source deduplication and retention are enforced by the memory store.
-        self.memory.add_history(scope,event.user_id,"user",text,event.event_id)
+        if text:self.memory.add_history(scope,event.user_id,"user",text,event.event_id)
         if settings.provider_mode=="cloud" and time.monotonic()<self._cloud_retry_after:
             return {"mode":"none","text":"","reason":"cloud_backoff"}
         context_generation=self.generation(scope)
-        memories = self.memory.retrieve(scope, event.user_id, text)
+        group_thread=self._dialogue_context(event,scope,settings) if group_thread is None else group_thread
+        from .member_context import select as member_context
+        memories = member_context(self.memory,scope,event.user_id,text,recent=list(group_context or [])+list(group_thread),related_users=self._related_members(event,scope))
         knowledge = lore.for_prompt(self.content_root, text)
         # Durable history is for memory management, not implicit conversation
         # replay. Every current conversation uses only recent confirmed turns.
         history = []
-        group_thread=self._dialogue_context(event,scope,settings) if group_thread is None else group_thread
         persona = (self.content_root / "content/persona.md").read_text()
         policy = prompt(self.content_root,"direct",settings)
-        policy += "\n" + "\n".join(prompt(self.content_root,key,settings) for key in ("knowledge","expression","vision","output","style","dialogue","conversation_target"))
+        if event.kind=="group" and is_addressed(event.text,getattr(self,"address_names_loader",lambda:[])()):
+            policy += prompt(self.content_root,"addressed",settings)
+        if event.mention_only:policy += '\n'+prompt(self.content_root,'mention_only',settings)
+        policy += "\n" + "\n".join(prompt(self.content_root,key,settings) for key in ("knowledge","member_memory","member_context_use","quoted_origin","expression","vision","output","style","dialogue","conversation_target"))
         expressions = [] if mode_override else assets.catalog(self.content_root,text)
         context = {"current_message":self._current_message(event),
                    "available_expressions":expressions,"trusted_identity": {"kind":event.kind, "user_id":event.user_id, "is_owner":owner},
@@ -1502,10 +2046,13 @@ class Engine:
                         if r["role"] in {"user","assistant"} and r["event_id"] != event.event_id)
         messages.append({"role":"user", "content":text})
         trace_data = trace_references(memories=memories,knowledge=knowledge,history=history,persona=persona,
+                                      quote_origin=context['current_message'].get('quote_origin'),
                                       group_context=group_context,dialogue=group_thread,input_characters=len(text),
                                       source_event_id=event.event_id,expressions=expressions)
         trace_data["_text_preview_allowed"] = self._preview_context_allowed(scope,group_context)
-        trace_id = self._trace_start(settings,"reply","direct",scope,event.user_id,trace_data,request_text=event.text)
+        request_kind='mention' if event.mention_only else 'message'
+        request_text=text if event.mention_only else event.text
+        trace_id = None if event.transport=="onebot" and event.kind=="group" and settings.group_chat_enabled else self._trace_start(settings,"reply","direct",scope,event.user_id,trace_data,request_text=request_text,request_kind=request_kind)
         try:
             provider = self.providers(settings)
         except Exception as exc:
@@ -1514,7 +2061,7 @@ class Engine:
         answer = await self._complete_traced(provider,messages,settings,kind="reply",trigger="direct",
                                             scope=scope,user=event.user_id,refs=trace_data,trace_id=trace_id,context_generation=context_generation,
                                             image_event_id=event.event_id,history_events={r["id"]:r["event_id"] for r in history},
-                                            request_text=event.text)
+                                            request_text=request_text,request_kind=request_kind)
         trace_id = trace_data.pop("_trace_id",trace_id)
         if not self.is_active():
             return {"mode":"none","text":"","reason":"profile_changed"}
@@ -1522,6 +2069,8 @@ class Engine:
             return {"mode":"none","text":"","reason":"privacy_context_changed"}
         if not isinstance(answer, dict):
             raise ProviderError("invalid_reply_object")
+        if answer.get("_local_observe"):
+            return {"mode":"none","text":"","reason":"conversation_observed"}
         response = clean_reply(answer.get("text", "") if isinstance(answer.get("text"), str) else "")
         if not response:
             raise ProviderError("empty_reply")
@@ -1534,8 +2083,8 @@ class Engine:
         # An image selection must not pretend its fallback text was spoken.
         # Actual assistant history is committed by acknowledge(), including only
         # the confirmed prefix of a partially delivered segmented reply.
-        if self.memory.consent(scope, event.user_id):
-            await self.summarize(scope, event.user_id, provider, settings)
+        # Automatic member-note extraction belongs to the background worker;
+        # never delay an already generated reply with another cloud request.
         if not self.is_active():
             self.discard_generated_media(result)
             return {"mode":"none","text":"","reason":"profile_changed"}
@@ -1549,7 +2098,8 @@ class Engine:
         return result
 
     async def _render_reply(self,event,scope,settings,answer,response,trace_data,*,trigger,
-                            context_generation,provider=None,mode_override=None,related_id=None,valid=None):
+                            context_generation,provider=None,mode_override=None,related_id=None,valid=None,
+                            voice_only=False):
         """One output boundary for direct replies, named turns and follow-ups.
 
         This only prepares media; the bridge remains the sole sender. Any
@@ -1557,23 +2107,31 @@ class Engine:
         """
         def current():
             return (self.is_active() and context_generation==self.generation(scope)
-                    and (valid is None or valid()))
+                    and (valid is None or valid())
+                    and (not self._group_target_context.get() or self._group_target_current(self._group_target_context.get())))
 
         def quiet():
             return {"mode":"none","text":"","reason":"privacy_context_changed" if self.is_active() else "bot_stopped"}
+
+        def voice_unavailable(reason):
+            if voice_only:
+                return {"mode":"none","text":"","reason":reason}
+            return {"mode":"text","text":response}
 
         if not current():
             return quiet()
         if answer.get("_web_evidence"):
             response=web_search.cite(dict(answer,text=response),answer["_web_evidence"],show=settings.web_search_show_sources or web_search.wants_sources(event.text))["text"]
-        mode=mode_override or answer.get("mode","text")
-        result=({"mode":"text","text":response} if mode_override else
+        mode="voice" if voice_only else mode_override or answer.get("mode","text")
+        result=({"mode":"text","text":response} if voice_only or mode_override else
                 self._expression_reply(answer,response,trace_data.get("assets",[])))
-        if (result["mode"]=="image" or mode!="voice" or not settings.voice_enabled
-            or not settings.voice_authorized or len(response)>settings.max_voice_chars
-            or re.search(r"https?://|```",response)):
+        if result["mode"]=="image" or mode!="voice" or (not voice_only and re.search(r"https?://|```",response)):
             return result
 
+        from .group_voice import voice_settings_error
+        is_group=event.kind=='group'
+        if error := voice_settings_error(settings,response,group=is_group):
+            return voice_unavailable(error)
         voice_trace=None;voice_reservation=None;voice_called=False
         try:
             # Recheck effective Profile voice settings before beginning a new
@@ -1581,12 +2139,12 @@ class Engine:
             latest=self.settings(scope)
             if not current():
                 return quiet()
-            if not latest.voice_enabled or not latest.voice_authorized:
-                return result
-            if event.kind=='group':
+            if error := voice_settings_error(latest,response,group=is_group):
+                return voice_unavailable(error)
+            if is_group:
                 voice_reservation=self.group_voice.reserve(scope,latest)
                 if voice_reservation is None:
-                    return result
+                    return voice_unavailable("group_voice_limit")
             provider=provider if provider is not None else self.providers(latest)
             voice_trace=self._trace_start(latest,"tts",trigger,scope,event.user_id,
                 trace_references(input_characters=len(response),source_event_id=event.event_id),
@@ -1622,11 +2180,12 @@ class Engine:
             if invalid:
                 self.discard_generated_media(result)
                 return quiet()
-            self.diagnostics.record("tts",safe_code(exc))
+            code=safe_code(exc)
+            self.diagnostics.record("tts",code)
             log.warning("voice_generation_failed")
             # Synthesis failed before sending anything: keep one actual text
-            # reply. Never append a delivery placeholder or retry a QQ send.
-            return {"mode":"text","text":response}
+            # reply for ordinary replies, or report failure for a voice-only send.
+            return voice_unavailable("voice_generation_failed" if code=="provider_unknown_error" else code)
         except Exception as exc:
             if voice_trace is not None:
                 self.trajectories.finish(voice_trace,"failed",error=exc)
@@ -1641,6 +2200,8 @@ class Engine:
         settings=self.settings()
         if not self.is_active():
             return {"status":"profile_changed","saved":0}
+        if self._capacity.locked():
+            return {"status":"reply_busy","saved":0}
         if not ((settings.transport=="onebot" and settings.onebot_enabled) or
                 (settings.transport=="official" and settings.qq_enabled)):
             return {"status":"transport_disabled","saved":0}
@@ -1652,6 +2213,8 @@ class Engine:
                            +[f"qq:{settings.app_id}:dm:{target}" for target in settings.allowed_dm_users])
         for member in self.memory.due_summaries(threshold=settings.auto_summary_every,limit=20,allowed_scopes=allowed_scopes,
                 max_wait_seconds=settings.auto_summary_max_wait_minutes*60):
+            if self.groups.opted_out(member['scope'],member['user']):
+                continue
             parts=member["scope"].split(":")
             if len(parts)!=4:
                 continue
@@ -1680,7 +2243,7 @@ class Engine:
                     return await self.summarize(member["scope"],member["user"],None,latest,trigger="background")
         return {"status":"idle","saved":0}
 
-    async def summarize(self, scope: str, user: str, provider, settings: Settings, *, force=False, trigger=None):
+    async def summarize(self, scope: str, user: str, provider, settings: Settings, *, force=False, trigger=None, revisit=False):
         # Snapshot this profile/group's cadence for both event and timer paths.
         settings=Settings.model_validate(settings.model_dump() | self.memory.summary_policy(scope))
         state = read_control(self.root)
@@ -1688,22 +2251,26 @@ class Engine:
             return {"status": "bot_stopped", "saved": 0}
         lease = self._activity_epoch.set(self._activity_epoch.get() or state["epoch"])
         try:
-            return await self._summarize(scope, user, provider, settings, force=force, trigger=trigger)
+            return await self._summarize(scope, user, provider, settings, force=force, trigger=trigger,revisit=revisit)
         finally:
             self._activity_epoch.reset(lease)
 
-    async def _summarize(self, scope: str, user: str, provider, settings: Settings, *, force=False, trigger=None):
+    async def _summarize(self, scope: str, user: str, provider, settings: Settings, *, force=False, trigger=None,revisit=False):
         if not self.is_active():
             return {"status":"profile_changed","saved":0}
         context_generation = self.generation(scope)
         claim=self.memory.begin_summary(scope,user,threshold=settings.auto_summary_every,force=force,
-                                        max_wait_seconds=settings.auto_summary_max_wait_minutes*60)
+                                        max_wait_seconds=settings.auto_summary_max_wait_minutes*60,revisit=revisit)
         if claim["status"] != "ready":
             return claim
         batch=claim["batch"]
-        pending=batch["history"]
-        trace_data = trace_references(history=pending)
-        trigger = "manual" if force else trigger or "automatic"
+        from .member_notes import background as member_background,summary_dialogue
+        pending=summary_dialogue(self.memory,scope,user,batch["history"])
+        batch['history']=pending
+        previous=member_background(self.memory,scope,user)
+        batch["previous_background"]=previous
+        trace_data = trace_references(history=pending,memories=[previous] if previous else [])
+        trigger = "manual_revisit" if revisit else "manual" if force else trigger or "automatic"
         trace_id = self._trace_start(settings,"summary",trigger,scope,user,trace_data,
             request_text=pending[-1]["text"] if pending else None,request_kind="summary_source")
         if settings.provider_mode == "cloud" and time.monotonic() < self._cloud_retry_after:
@@ -1712,9 +2279,12 @@ class Engine:
         try:
             # Most observed messages do not yet form a due batch. Resolve
             # credentials only once a real extraction is ready and budgeted.
+            evidence=[dict(r,observed_at=datetime.fromtimestamp(r['created_at'],timezone.utc).isoformat()) for r in pending]
+            if previous:
+                evidence[0]['previous_member_background']={k:previous[k] for k in ('id','text','source','version')}
             data = await self._complete_traced(provider,[
-                {"role":"system", "content":prompt(self.content_root,"summary",settings)},
-                {"role":"user", "content":json.dumps(pending, ensure_ascii=False)}],settings,
+                {"role":"system", "content":prompt(self.content_root,"summary",settings)+'\n'+prompt(self.content_root,"member_summary",settings)},
+                {"role":"user", "content":json.dumps(evidence, ensure_ascii=False)}],settings,
                 kind="summary",trigger=trigger,scope=scope,user=user,refs=trace_data,trace_id=trace_id,context_generation=context_generation,
                 request_text=pending[-1]["text"] if pending else None,request_kind="summary_source")
             trace_id = trace_data.pop("_trace_id",trace_id)
@@ -1727,10 +2297,11 @@ class Engine:
             if not self.is_active():
                 self.trajectories.finish(trace_id,"profile_changed")
                 return self.memory.fail_summary(scope,user,batch,"cloud_backoff",60)
-            result=self.memory.finish_summary(scope,user,batch,data.get("memories",[]))
+            result=self.memory.finish_summary(scope,user,batch,data.get("memories",[]),
+                background=data.get('background'),interactions=data.get('interactions'))
             if result["status"] in {"saved","no_facts"}:
                 summary_preview=[{"text":item["text"],"source_ids":[n for n in item.get("source_ids",[])[:100] if type(n) is int]}
-                    for item in data.get("memories",[])[:3] if isinstance(item,dict) and isinstance(item.get("text"),str)
+                    for item in (data.get("memories",[])[:6]+([data["background"]] if data.get("background") else [])+(data.get("interactions") or [])) if isinstance(item,dict) and isinstance(item.get("text"),str)
                     and isinstance(item.get("source_ids"),list)]
                 self.trajectories.record_response(trace_id,json.dumps(summary_preview,ensure_ascii=False),kind="summary")
             self.trajectories.finish(trace_id,result["status"],result=result)
@@ -1756,7 +2327,8 @@ class Engine:
         memory_policy = ("本群已开启全员默认记忆，收到的合格文字按每位成员分别保存和整理；个人关闭设置优先。"
                          if group_collection else "本范围未开启全群默认记忆，可用 /记忆 开启 设置本人的长期记录。")
         if text in {"/帮助", "/隐私"}:
-            return ("白名单群开启群聊参与时，最近图文会作为短期上下文发往已配置的云端模型判断是否接话；图片理解可由管理员关闭，图片只在内存短期缓存，GIF仅处理首帧。群短期上下文不整段落盘；本机调用轨迹另保存触发消息末尾最多120字和回复最多2000字供管理员排查，随轨迹保留最多30天，删除/纠错来源会清理相关预览。可用 /旁听 关闭 退出并停止保存本人新的轨迹文本。\n"
+            return ("单条消息以 （（ 或 (( 开头（前面可留空格），本条文字和附件会被忽略：不回复、不送模型、不进入上下文、历史、记忆或调用轨迹；被引用时也不读取其内容。下一条正常消息照常处理。此标记不会撤回 QQ 消息，也不会隐藏其他群友手动转述的内容。\n"
+                    "白名单群开启群聊参与时，最近图文会作为短期上下文发往已配置的云端模型判断是否接话；图片理解可由管理员关闭，图片只在内存短期缓存，GIF仅处理首帧。群短期上下文不整段落盘；本机调用轨迹另保存触发消息末尾最多120字和回复最多2000字供管理员排查，随轨迹保留最多30天，删除/纠错来源会清理相关预览。可用 /旁听 关闭 退出并停止保存本人新的轨迹文本。\n"
                     +memory_policy+"原文最多保留30天、每人200条；整理时会发给已配置的云端模型。记忆限当前角色、群和本人，推断可纠正；群内回复可能提及本群保存的偏好。用 /记忆 关闭 停止并清除自动记录，或 /忘记我 清除个人记录。\n"
                     "/身份 · /旁听 开启 · /旁听 关闭 · /记忆 开启 · /记忆 关闭 · /记忆 · /记住 内容 · /纠正 编号 内容 · /忘记 编号 · /忘记我 · /语音 内容 · /文字 内容 · /表情 名称 · /订阅 帮助\n"
                     "主人可用 /群记住、/事件、/关系 保存公共条目。撤回QQ消息不会自动删除数据库；请使用删除指令。")

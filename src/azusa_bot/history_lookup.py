@@ -9,6 +9,7 @@ import json
 import re
 import time
 from .group_chat import GroupConversation
+from .message_privacy import hidden_message
 from .prompts import prompt
 from .providers import ProviderError
 
@@ -74,7 +75,7 @@ def valid(memory,scope,user,refs):
         if not memory._consent(scope,user):return False
         for ref in selected:
             row=memory._db.execute('SELECT text,created_at FROM history WHERE id=? AND scope=? AND user_id=?',(ref['id'],scope,user)).fetchone()
-            if not row or fingerprint(row['text'])!=ref['sha256'] or not 0<=time.time()-row['created_at']<=7*86400:return False
+            if not row or hidden_message(row['text']) or fingerprint(row['text'])!=ref['sha256'] or not 0<=time.time()-row['created_at']<=7*86400:return False
     return True
 
 
@@ -85,7 +86,7 @@ def resolve(memory,scope,user,lookup):
         for ref in lookup.get('references',[]):
             item={'id':ref['id'],'available':False}
             row=memory._db.execute('SELECT text,role,created_at FROM history WHERE id=? AND scope=? AND user_id=?',(ref['id'],scope,user)).fetchone()
-            if row and memory._consent(scope,user) and fingerprint(row['text'])==ref['sha256']:
+            if row and not hidden_message(row['text']) and memory._consent(scope,user) and fingerprint(row['text'])==ref['sha256']:
                 item.update(available=True,role=row['role'],created_at=row['created_at'],preview=safe_preview(row['text']))
             result.append(item)
     return result

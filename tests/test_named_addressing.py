@@ -5,8 +5,9 @@ import json
 import pytest
 from context_helpers import context as wire_context
 
-from azusa_bot.group_addressing import address_names, is_addressed
+from azusa_bot.group_addressing import address_names, is_addressed, vocative_target_groups
 from azusa_bot.settings import write_settings
+from azusa_bot.providers import mock_group_plan
 from test_group_decision_cost import rig, event, SCOPE
 from test_followup_scheduling import controlled_wait
 
@@ -16,6 +17,15 @@ def named(rig):
     engine, provider, settings, clock = rig
     provider.answer = {"participate": True, "confidence": .95, "mode": "text"}
     async def complete(messages, **kwargs):
+        data=wire_context(messages)
+        if data.get('task')=='group_plan':
+            provider.plan_calls.append(messages)
+            answer=mock_group_plan(data)
+            if data.get('local_relation',{}).get('facts',{}).get('self_name_candidate'):
+                answer['participation_plan'].update(action='reply',target='self',addressee_ids=['10001'])
+            if provider.answer.get('participate') is False:answer['participation_plan']['action']='observe'
+            answer.update({k:v for k,v in provider.answer.items() if k in {'confidence','votes'}})
+            return answer
         provider.calls.append(messages)
         return provider.answer | {"text": "第" + str(len(provider.calls)) + "次合成回答，可以继续交流。"}
     provider.complete = complete
@@ -34,6 +44,27 @@ def test_old_compatibility_duplicates_preserve_other_names_and_display():
     assert not is_addressed("Ａnnex", ["Ann"])
     with pytest.raises(ValueError):
         address_names(["小Z", "小z"])
+
+
+@pytest.mark.parametrize("text", [
+    "阿梓和灰泽满说话来",
+    "阿梓与灰泽满，你们都来说几句吧！",
+    "阿梓和灰泽满一起聊聊",
+])
+def test_coordinated_invitation_resolves_both_known_names(text):
+    names = {"10001": ["阿梓"], "10002": ["灰泽满"]}
+    assert vocative_target_groups(text, names) == ({"10001"}, {"10002"})
+
+
+def test_coordinated_invitation_requires_locally_known_names_and_a_directive():
+    names = {"10001": ["阿梓"], "10002": ["灰泽满"]}
+    assert not vocative_target_groups("阿梓和灰泽满说话来", {"10001": ["阿梓"]})
+    assert not vocative_target_groups("阿梓和灰泽满说话来", {"10002": ["灰泽满"]})
+    assert not vocative_target_groups("阿梓和灰泽满今天都发了动态", names)
+    assert not vocative_target_groups("阿梓和灰泽满一起说话？", names)
+    assert not vocative_target_groups("有人喊阿梓和灰泽满说话来", names)
+    assert vocative_target_groups("阿梓，和灰泽满聊聊", names) == ({"10001"},)
+    assert vocative_target_groups("阿梓，和灰泽满说话来", names) == ({"10001"},)
 
 
 @pytest.mark.asyncio
@@ -62,7 +93,7 @@ async def begin_interval(named):
 
 
 @pytest.mark.asyncio
-async def test_short_interval_waits_and_same_member_plain_continuation_takes_over(named, monkeypatch):
+async def test_short_interval_preserves_explicit_call_when_same_member_adds_another_message(named, monkeypatch):
     engine, provider, clock = await begin_interval(named)
     entered, release, delays = controlled_wait(monkeypatch, clock)
     first = asyncio.create_task(engine.handle(event(2, "小z，小z")))
@@ -72,8 +103,8 @@ async def test_short_interval_waits_and_same_member_plain_continuation_takes_ove
     assert len(provider.calls) == 1
     release.set()
     old, fresh = await asyncio.gather(first, latest)
-    assert old["mode"] == "none" and fresh["mode"] == "text"
-    assert delays == [4.0] and len(provider.calls) == 2
+    assert old["mode"] == "text" and fresh["mode"] == "text"
+    assert delays[0] == 4.0 and len(provider.calls) == 3
     payload = wire_context(provider.calls[-1])
     assert payload["current_message"]["message_id"] == "3"
     assert {"2", "3"} <= {row["message_id"] for row in payload["recent_conversation"]+[payload["current_message"]]}
@@ -96,7 +127,7 @@ async def test_other_members_named_request_does_not_cancel_first(named, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_capacity_recheck_skips_superseded_call_without_spending(named):
+async def test_capacity_recheck_cancels_question_explicitly_revised_before_call(named):
     engine, provider, _, _ = named
     entered, release = asyncio.Event(), asyncio.Event()
     class Capacity:
@@ -109,13 +140,13 @@ async def test_capacity_recheck_skips_superseded_call_without_spending(named):
     await asyncio.wait_for(entered.wait(), 1)
     latest = asyncio.create_task(engine.handle(event(2, "我补充一下，是这个问题")))
     await asyncio.sleep(0)
-    assert engine._name_decisions == {} and provider.calls == []
+    assert provider.calls == []
     release.set()
     old, fresh = await asyncio.gather(first, latest)
     assert old["mode"] == "none" and fresh["mode"] == "text"
     assert len(provider.calls) == 1
     with engine.ledger.db() as db:
-        assert db.execute("SELECT SUM(used) FROM budget").fetchone()[0] == 1
+        assert db.execute("SELECT SUM(used) FROM budget").fetchone()[0] == 2
 
 
 @pytest.mark.asyncio
@@ -140,11 +171,11 @@ async def test_named_wait_rechecks_privacy_and_policy_before_spending(named, mon
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("answer,reason", [({"participate": False}, "chose_silence"), ({"confidence": .4}, "low_confidence")])
-async def test_name_keeps_semantic_checks_and_does_not_become_owner(named, answer, reason):
+async def test_explicit_name_uses_plan_not_generation_votes_and_does_not_become_owner(named, answer, reason):
     engine, provider, settings, _ = named
     provider.answer.update(answer)
     reply = await engine.handle(event(1, "小z"))
-    assert reply["reason"] == reason and reply["mode"] == "none"
+    assert reply["mode"] == "text" and not provider.plan_calls
     assert not settings.is_owner("group", "30001", "20001", "onebot")
     prompt = provider.calls[0][0]["content"]
     assert "只喊一声名字也可以应一声" in prompt and "不等于有主人或管理权限" in prompt
@@ -160,7 +191,7 @@ async def test_name_does_not_bypass_total_cloud_budget_or_other_mention(named):
     clock.advance(6)
     assert (await engine.handle(event(2, "小z，继续")))["reason"] == "cloud_budget"
     other = event(3, "小z，你说呢").model_copy(update={"other_mentioned": True})
-    assert (await engine.handle(other))["reason"] == "followup_not_for_bot"
+    assert (await engine.handle(other))["mode"] == "none"
     assert len(provider.calls) == 1 and engine._named_candidates == {}
 
 
@@ -168,7 +199,9 @@ async def test_name_does_not_bypass_total_cloud_budget_or_other_mention(named):
 async def test_unanswered_completed_name_does_not_create_long_lived_inheritance(named):
     engine, provider, _, clock = named
     provider.answer["participate"] = False
-    assert (await engine.handle(event(1, "小z")))["reason"] == "chose_silence"
+    first=await engine.handle(event(1, "小z"))
+    assert first["mode"] == "text"
+    engine.acknowledge(first["reply_id"],"failed")
     clock.advance(6)
     assert (await engine.handle(event(2, "这是普通的一句话")))["reason"] == "decision_cooldown"
     assert len(provider.calls) == 1 and engine._named_candidates == {}
@@ -199,7 +232,7 @@ async def test_inflight_named_answer_is_only_superseded_by_its_speaker(named, sa
     clock.advance(6)
     release.set()
     old, fresh = await asyncio.gather(first, second)
-    assert old["mode"] == ("none" if same_member else "text")
+    assert old["mode"] == "text"
     assert fresh["mode"] == ("text" if same_member else "none")
     assert len(provider.calls) == (2 if same_member else 1)
     assert engine._named_candidates == {}
@@ -224,7 +257,7 @@ async def test_pending_name_expiry_does_not_turn_later_chat_into_a_named_request
     await asyncio.sleep(0)
     release.set()
     old, fresh = await asyncio.gather(first, second)
-    assert old["mode"] == "none" and fresh["reason"] == "collecting_context"
+    assert old["mode"] == "text" and fresh["reason"] == "decision_cooldown"
     assert len(provider.calls) == 1 and engine._named_candidates == {}
 
 
@@ -238,3 +271,11 @@ async def test_cancelled_named_wait_does_not_leave_an_inheritance_window(named, 
     with pytest.raises(asyncio.CancelledError):
         await waiting
     assert engine._named_candidates == {} and len(provider.calls) == 1
+
+
+async def test_nonleading_explicit_name_is_not_blocked_by_proactive_score(named):
+    engine, provider, _, _ = named
+    provider.answer['confidence'] = .1
+    response = await engine.handle(event(1, '请问小z，你怎么看'))
+    assert response['mode'] == 'text'
+    assert len(provider.plan_calls) == len(provider.calls) == 1

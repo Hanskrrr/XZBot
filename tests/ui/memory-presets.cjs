@@ -12,7 +12,8 @@ const {execFileSync}=require('node:child_process');const root=path.resolve(__dir
  try{
  const page=await browser.newPage({viewport:{width:1280,height:1000}});page.setDefaultTimeout(8000);page.on('pageerror',e=>errors.push(e.message));
  await page.route('**/*',async route=>{const req=route.request(),u=new URL(req.url()),method=req.method(),body=req.postDataJSON(),profile=req.headers()['x-xzbot-profile'];calls.push({path:u.pathname,method,body,profile,url:u.href});assert.equal(u.origin,'http://xzbot.test');let result={};
-  if(u.pathname==='/'){await route.fulfill({contentType:'text/html',body:require('./load-ui.cjs')(root)});return;}
+  if(await require('./passive-admin.cjs')(route,["runtime/choice","memory/member-context"]))return;
+ if(u.pathname==='/'){await route.fulfill({contentType:'text/html',body:require('./load-ui.cjs')(root)});return;}
   if(u.pathname==='/admin/status')result={settings,credentials:{},stats:{},version:'offline'};
   else if(u.pathname==='/admin/settings'){assert.equal(method,'GET');result=settings;}
   else if(u.pathname==='/admin/profiles')result={active_id:active,profiles:[{id:'default',name:'测试角色',voice:{}},{id:'other',name:'另一角色',voice:{}}]};

@@ -541,6 +541,8 @@ def list_documents(root, limit=100, offset=0, *, collection=None, sort='added_de
         selected=[r for r in all_rows if collection is None or r.get('collection','')==collection]
         if sort=='title':selected.sort(key=lambda r:(r['title'].casefold(),r['id']))
         else:selected.sort(key=lambda r:(r['created_at'],r['id']),reverse=sort=='added_desc')
+        # Keep full background first across pages, retaining the chosen order within each group.
+        selected.sort(key=lambda r:not r.get('always_include',False))
         return {'total':len(selected),'documents':[store.public(r) for r in selected[offset:offset+limit]],
                 'collections':[{'name':k,'count':v} for k,v in sorted(counts.items())]}
 

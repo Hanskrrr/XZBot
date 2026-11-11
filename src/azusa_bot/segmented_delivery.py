@@ -50,8 +50,10 @@ def authorize(manager, reply_id, index):
                            (reply_id, index)).fetchall()
         if len(prior) != index or any(row[0] != "sent" for row in prior):
             return False
-        return bool(db.execute("UPDATE delivery_segments SET status='authorized' WHERE reply_id=? AND segment_index=? AND status='planned'",
-                               (reply_id, index)).rowcount)
+        return bool(db.execute(
+            "UPDATE delivery_segments SET status='authorized' WHERE reply_id=? AND segment_index=? AND status='planned' "
+            "AND EXISTS (SELECT 1 FROM deliveries WHERE reply_id=delivery_segments.reply_id AND status='prepared')",
+            (reply_id, index)).rowcount)
 
 
 def acknowledge(manager, reply_id, index, status, message_id=None):
@@ -69,16 +71,25 @@ def acknowledge(manager, reply_id, index, status, message_id=None):
 
 def settle(engine, reply_id, *, abort=False):
     with engine.ledger.db() as db:
+        db.execute("BEGIN IMMEDIATE")
         if abort:
             db.execute("UPDATE delivery_segments SET status=CASE WHEN status='authorized' THEN 'uncertain' ELSE 'cancelled' END WHERE reply_id=? AND status IN ('planned','authorized')", (reply_id,))
         rows = [dict(row) for row in db.execute("SELECT * FROM delivery_segments WHERE reply_id=? ORDER BY segment_index", (reply_id,))]
         if not rows or any(row["status"] in {"planned", "authorized"} for row in rows):
             return
         delivery = db.execute("SELECT profile_id,profile_epoch,status FROM deliveries WHERE reply_id=?", (reply_id,)).fetchone()
-        # Duplicate ACK/finalize requests cannot append history again.
-        if not delivery or delivery["status"] in {"sent", "partial", "partial_uncertain", "uncertain", "cancelled"}:
+        # Only the first finalizer may commit the aggregate receipt and history.
+        if not delivery or delivery["status"] not in {"prepared", "context_changed"}:
             return
-    sent = [row for row in rows if row["status"] == "sent"]
+        sent = [row for row in rows if row["status"] == "sent"]
+        uncertain = any(row["status"] == "uncertain" for row in rows)
+        if len(sent) == len(rows):
+            status = "sent"
+        elif sent:
+            status = "partial_uncertain" if uncertain else "partial"
+        else:
+            status = "uncertain" if uncertain else "cancelled"
+        db.execute("UPDATE deliveries SET status=? WHERE reply_id=?", (status, reply_id))
     pending = engine._group_pending.get(reply_id)
     if (pending and "segments" in pending and engine.is_active()
             and delivery["profile_id"] == engine.profile_id and delivery["profile_epoch"] == engine.profile_epoch
@@ -88,12 +99,9 @@ def settle(engine, reply_id, *, abort=False):
             parts = pending["segments"]
             pending["text"] = "\n".join(parts[row["segment_index"]] for row in sent)
             pending["confirmed_segments"] = [(row["message_id"], parts[row["segment_index"]]) for row in sent]
-            engine.acknowledge(reply_id, "sent", sent[-1]["message_id"])
-        else:
-            engine.acknowledge(reply_id, "uncertain")
-    uncertain = any(row["status"] == "uncertain" for row in rows)
-    status = "sent" if len(sent) == len(rows) else ("partial_uncertain" if uncertain else "partial") if sent else "uncertain" if uncertain else "cancelled"
-    engine.ledger.mark(reply_id, status)
+            engine._apply_reply_receipt(reply_id, "sent", sent[-1]["message_id"])
+            return
+    engine._apply_reply_receipt(reply_id, "uncertain")
 
 
 def metadata(ledger, reply_id):

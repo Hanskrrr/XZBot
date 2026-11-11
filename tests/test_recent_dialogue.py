@@ -5,7 +5,7 @@ from context_helpers import dialogue
 
 from azusa_bot.dialogue import RecentDialogue, refers_back, requests_repeat
 from azusa_bot.prompts import DEFAULTS, SCENES, describe, save
-from test_group_followup import rig, event, start, configure, calls, SCOPE, IDENTITY
+from test_group_followup import rig, event, start, configure, calls, plans, SCOPE, IDENTITY
 
 
 def context(provider):
@@ -74,17 +74,33 @@ async def test_normal_followup_still_blocks_accidental_duplicate(rig):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('change',['expired','other_member','other_group','cleared'])
+@pytest.mark.parametrize('change',['expired','other_group','cleared'])
 async def test_repeat_does_not_reopen_unrelated_or_expired_turns(rig,change):
     engine,settings,provider,clock=rig
     await start(engine);clock.advance(6)
     updates={}
     if change=='expired':clock.advance(settings.group_chat_context_minutes*60)
-    if change=='other_member':updates['user_id']='20002'
     if change=='other_group':updates['scope_id']='30002'
     if change=='cleared':engine.clear_group_context(SCOPE)
     result=await engine.handle(event('再来一次',event_id='not-ours',**updates))
     assert result['mode']=='none' and not calls(provider,'followup')
+
+
+@pytest.mark.parametrize('addressed_to_bot',[False,True])
+async def test_other_member_repeat_uses_public_assessment_without_borrowing_direct_dialogue(rig,addressed_to_bot):
+    engine,_,provider,clock=rig
+    await start(engine);clock.advance(6)
+    provider.followup_reply=dict(provider.followup_reply,participate=addressed_to_bot,
+                                 continuation=addressed_to_bot)
+    result=await engine.handle(event('再来一次',user_id='20002',event_id='public-repeat'))
+    assert len(plans(provider,'followup'))==1
+    assert (result['mode']=='text') is addressed_to_bot
+    if addressed_to_bot:
+        assert dialogue(calls(provider,'followup')[0]['messages'])==[]
+    else:assert calls(provider,'followup')==[]
+    # Prepared speech, or a decision to observe, never lends the original
+    # member's confirmed private dialogue window to another person.
+    assert engine.dialogue.get(SCOPE,'20002',ttl_seconds=900)==[]
 
 
 @pytest.mark.asyncio

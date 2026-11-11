@@ -1,0 +1,90 @@
+// All requests are intercepted. No local credentials, cloud calls or QQ sends.
+const {chromium}=require('playwright');
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const root=path.resolve(__dirname,'../..'),html=require('./load-ui.cjs')(root);
+(async()=>{
+ const scope='onebot:100001:group:300003',user='200003',calls=[],errors=[];
+ const settings=JSON.parse(require('node:child_process').execFileSync(path.join(root,'.venv/bin/python'),['-c','from azusa_bot.settings import Settings;print(Settings().model_dump_json())'],{cwd:root,encoding:'utf8'}));
+ Object.assign(settings,{transport:'onebot',onebot_enabled:true,onebot_self_id:'100001',onebot_allowed_groups:['300003']});
+ const policy=Object.fromEntries(Object.entries(settings).filter(([k])=>k.startsWith('group_')&&k!=='group_idle_groups'));
+ const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'});
+ try{
+  const page=await browser.newPage({viewport:{width:1280,height:1000}});page.setDefaultTimeout(8000);
+  page.on('pageerror',e=>errors.push(e.message));page.on('dialog',d=>d.accept());
+  await page.route('**/*',async route=>{
+   const req=route.request(),url=new URL(req.url()),body=req.postDataJSON();calls.push({path:url.pathname,body});
+   if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:html});
+   let result={};
+   switch(url.pathname){
+    case '/admin/profiles':result={active_id:'default',profiles:[{id:'default',name:'合成角色',voice:{voice_enabled:false}}]};break;
+    case '/admin/status':result={version:'offline',settings,credentials:{},stats:{history:1,memories:1}};break;
+    case '/admin/settings':result=settings;break;
+    case '/admin/group-settings':result={scope,revision:'1',settings:policy,scopes:[{scope,label:'测试群'}]};break;
+    case '/admin/group-presets':case '/admin/memory-presets':result={presets:[],revision:'1'};break;
+    case '/admin/memory-settings':result={scope,settings:{group_collection_enabled:true,auto_summary_every:12,auto_summary_max_wait_minutes:30},revision:'1'};break;
+    case '/admin/memory/browse':result={items:[{id:1,scope,subject:user,kind:'personal',source:'inferred',facet:'experience',text:'曾提到赢过一次比赛',created_at:1}],next_before:null};break;
+    case '/admin/memory/status':result={stats:{history:1,memories:1},members:[],group_policies:[{scope,enabled:true}],auto_summary_every:12,retention:{history_days:30,max_history:200}};break;
+    case '/admin/memory/targets':result={scopes:[{scope,scope_id:'300003',kind:'group',label:'测试群',group_collection_enabled:true,members:[{user,display_name:'合成成员',enabled:true,collection_source:'group_default'}]}]};break;
+    case '/admin/memory/member-context':result={schedule:{poll_seconds:60,threshold:12,max_wait_minutes:30,enabled:true,bot_running:true,pending:8,ready:false,last_attempt_at:1,last_success_at:1,last_status:'saved'},background:{id:20,scope,subject:user,text:'小明喜欢猫。',version:1,source:'inferred',updated_at:1,source_ids:[7]},recent_interactions:[{id:21,scope,subject:user,text:'昨天聊到排位。',period_start:1,period_end:2,updated_at:3,source_ids:[7]}],window_hours:72};break;
+    case '/admin/memory/member-background':assert.deepEqual(body,{scope,user,text:'小明喜欢猫和游戏。',version:1,profile_id:'default'});result={background:{id:20,scope,subject:user,text:body.text,version:2,source:'explicit',updated_at:2,source_ids:[]},recent_interactions:[],window_hours:72};break;
+    case '/admin/memory/summarize':assert.deepEqual(body,{scope,user,revisit:true});result={status:'saved',saved:1,processed:1,profile_id:'default'};break;
+    case '/admin/prompts':result={revision:'1',blocks:Object.entries(JSON.parse(fs.readFileSync(path.join(root,'src/azusa_bot/prompt_defaults.json'),'utf8'))).map(([key,r])=>({key,...r,default:r.text,rendered:r.text,customized:false})),scenes:{}};break;
+    case '/admin/persona':result={text:'合成角色'};break;
+    case '/admin/desktop/status':result={supervisor_running:false};break;
+    case '/admin/bot-power':result={enabled:true,state:'running',busy:false};break;
+    case '/admin/runtime/choice':result={environment:'external',adapter:'napcat',available_environments:['external']};break;
+    case '/admin/qq-status':result={state:'online',label:'在线',fresh:true};break;
+    case '/admin/diagnostics':result={services:[],events:[]};break;
+    default:errors.push('Unexpected endpoint '+url.pathname);return route.abort();
+   }
+   await route.fulfill({json:result});
+  });
+  await page.goto('http://xzbot-offline.test/#token=SYNTHETIC_LOCAL_ADMIN');
+  await page.waitForFunction(()=>document.querySelector('#connection-badge').textContent.includes('已连接'));
+  await page.locator('[data-tab="memory"]').click();
+  await page.waitForFunction(()=>memoryPolicy!==null);
+  await page.locator('#memory-view-collection').click();
+  await page.locator('#memory-target-member').selectOption(user);
+  assert.equal(await page.locator('#memory-revisit').isChecked(),false);
+  await page.locator('#memory-revisit').check();await page.locator('#summarize-memory').click();
+  await page.waitForFunction(()=>document.querySelector('#memory-consent-state').textContent.includes('已保存'));
+  assert.equal(calls.filter(c=>c.path==='/admin/memory/summarize').length,1);
+  await page.locator('#memory-view-members').click();
+  await page.waitForFunction(()=>document.querySelector('#member-background-text').value==='小明喜欢猫。');
+  assert((await page.locator('#member-recent-interactions').innerText()).includes('昨天聊到排位'));
+  assert((await page.locator('#member-auto-summary').innerText()).includes('当前待整理 8 条'));
+  assert((await page.locator('#member-auto-summary').innerText()).includes('30 分钟'));
+  await page.setViewportSize({width:390,height:844});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+  await page.locator('#member-context-panel').screenshot({path:'/tmp/xzbot-member-schedule-mobile.png'});
+  await page.setViewportSize({width:1280,height:1000});
+  await page.locator('#member-background-text').fill('小明喜欢猫和游戏。');
+  await page.locator('#save-member-background').click();
+  await page.waitForFunction(()=>document.querySelector('#member-context-state').textContent.includes('已保存并固定'));
+  assert((await page.locator('#member-background-meta').innerText()).includes('版本 2'));
+  await page.locator('#member-context-panel').screenshot({path:'/tmp/xzbot-member-notes-desktop.png'});
+  await page.locator('#memory-view-records').click();
+  assert((await page.locator('#records').innerText()).includes('曾提到的经历'));
+  await page.evaluate(async()=>{
+   await loadPrompts();
+   const host=document.createElement('div');host.id='test-memory-trace';host.className='panel';document.body.append(host);
+   renderTrajectoryReferences(host,'送入的长期记忆',[{id:1,available:true,kind:'personal',source:'inferred',facet:'experience',selection_reason:'recent_topic',preview:'曾提到赢过一次比赛',source_ids:[7],created_at:1}],'memory');
+  });
+  assert(await page.locator('#prompt-select option[value="member_memory"]').count()===1);
+  assert((await page.locator('#test-memory-trace').innerText()).includes('结合近期话题召回'));
+  assert((await page.locator('#test-memory-trace').innerText()).includes('非事件时间'));
+  await page.locator('#test-memory-trace').screenshot({path:'/tmp/xzbot-member-memory-trace.png'});
+  await page.setViewportSize({width:390,height:844});
+  await page.locator('#memory-view-collection').click();
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+  await page.locator('#memory-collection-controls').screenshot({path:'/tmp/xzbot-member-memory-mobile.png'});
+  await page.locator('#memory-view-members').click();
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+  await page.locator('#member-context-panel').screenshot({path:'/tmp/xzbot-member-notes-mobile.png'});
+  await page.locator('#memory-target-member').selectOption('');
+  assert.equal(await page.locator('#member-background-text').inputValue(),'');
+  assert.equal(await page.locator('#save-member-background').isDisabled(),true);
+  assert.deepEqual(errors,[]);
+  console.log(JSON.stringify({offline:true,revisit_control:true,source_facet:true,trace_reason:true,editable_prompt:true,mobile_width:true,all_passed:true}));
+ }finally{await browser.close();}
+})().catch(e=>{console.error(e.stack);process.exitCode=1;});

@@ -9,6 +9,7 @@ from azusa_bot.group_policies import effective, curve, create_router
 from azusa_bot.settings import Settings, private_write
 from azusa_bot.group_chat import GroupConversation
 from azusa_bot.memory import MemoryStore
+from azusa_bot.providers import mock_group_plan
 from test_group_engine import rig, event, configure, SCOPE
 
 OTHER='onebot:10001:group:30002'
@@ -46,6 +47,24 @@ def test_admin_cas_and_reject_privilege_fields(rig):
         assert c.put('/admin/group-settings',json={'scope':SCOPE,'revision':a['revision'],'settings':{'group_confidence_decay':'linear','group_confidence_floor':.9,'group_chat_confidence_threshold':.8}}).status_code==422
 
 
+def test_peer_echo_defaults_off_and_can_be_enabled_for_one_group(rig):
+    e,*_=rig;app=FastAPI();app.include_router(create_router(SimpleNamespace(current=e)))
+    with TestClient(app) as c:
+        current=c.get('/admin/group-settings',params={'scope':SCOPE}).json()
+        assert current['settings']['group_chat_peer_echo_enabled'] is False
+        saved=c.put('/admin/group-settings',json={'scope':SCOPE,'revision':current['revision'],
+            'settings':{'group_chat_peer_echo_enabled':True}})
+        assert saved.status_code==200
+        assert saved.json()['settings']['group_chat_peer_echo_enabled'] is True
+        assert e.settings(SCOPE).group_chat_peer_echo_enabled
+        assert not e.settings(OTHER).group_chat_peer_echo_enabled
+        for invalid in ('true',1,None):
+            response=c.put('/admin/group-settings',json={'scope':SCOPE,'revision':saved.json()['revision'],
+                'settings':{'group_chat_peer_echo_enabled':invalid}})
+            assert response.status_code==422
+        assert e.settings(SCOPE).group_chat_peer_echo_enabled
+
+
 @pytest.mark.parametrize('mode,half',[('fixed',.8),('linear',.7),('slow_start',.75)])
 def test_curve_grace_monotone_floor(mode,half):
     s=Settings(group_chat_confidence_threshold=.8,group_confidence_floor=.6,group_confidence_decay=mode,
@@ -72,11 +91,12 @@ def test_context_limits_do_not_shrink_other_groups(rig):
 
 
 @pytest.mark.asyncio
-async def test_silence_decays_only_unsolicited_and_trace_records_actual_threshold(rig):
+async def test_silence_policy_tracks_real_sends_without_overriding_local_plan(rig):
     e,s,p,clock=rig
     configure(e,s,group_confidence_decay='slow_start',group_confidence_floor=.6,group_confidence_grace_minutes=0,group_confidence_decay_minutes=10)
     e.groups.silence_seconds(SCOPE);clock.advance(600)
     p.answer['confidence']=.7
+    p.plan_answer=lambda data: mock_group_plan(data) | {'confidence': .7}
     reply=await e.handle(event())
     assert reply['mode']=='text'
     trace=e.trajectories.list()['items'][0]
@@ -134,14 +154,15 @@ def test_topic_budget_is_independent_per_group(rig):
 
 
 @pytest.mark.asyncio
-async def test_named_and_followup_do_not_lower_correctness_gate(rig):
+async def test_explicit_name_is_not_silenced_by_obsolete_generation_confidence(rig):
     e,s,p,clock=rig
     configure(e,s,group_confidence_decay='linear',group_confidence_floor=.5,group_confidence_grace_minutes=0,group_confidence_decay_minutes=1)
     e.address_names_loader=lambda:['小z'];e.groups.silence_seconds(SCOPE);clock.advance(1000)
     p.answer['confidence']=.7
     reply=await e.handle(event('小z 你在吗'))
-    assert reply['reason']=='low_confidence'
-    assert e.trajectories.list()['items'][0]['confidence_threshold']==.8
+    assert reply['mode']=='text'
+    assert not p.plan_calls
+    assert e.trajectories.list()['items'][0]['reply_contract']['required']==['text','mode']
 
 
 def test_admin_read_does_not_start_silence_clock(rig):

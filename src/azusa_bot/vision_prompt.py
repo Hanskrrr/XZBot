@@ -35,7 +35,7 @@ def visual_sources(messages, refs, kind, current_event=None, history_events=None
     claims. Old group pictures require an explicit reply to a retained message.
     A duplicate acknowledged-dialogue row must not refresh an image's age.
     """
-    if kind in {"summary","group_topic"}:
+    if kind in {"summary","group_topic","group_plan"}:
         return {}
     data_items = list(_envelopes(messages,kind,refs))
     anchor = next((data["current_message"] for data in data_items if "current_message" in data),{})

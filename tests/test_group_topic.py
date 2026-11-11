@@ -4,6 +4,7 @@ import json
 import math
 import pytest
 from context_helpers import context as wire_context
+from azusa_bot.providers import mock_group_plan
 from azusa_bot import group_topic, lore
 from azusa_bot.core import Ledger
 from azusa_bot.providers import ProviderError
@@ -15,13 +16,21 @@ from test_group_engine import rig, event, configure, SCOPE
 
 class TopicModel:
     def __init__(self):
-        self.calls=[];self.score=.91;self.invalid_source=False;self.related=True
+        self.calls=[];self.plan_calls=[];self.stages=[];self.plan_action='reply'
+        self.score=.91;self.invalid_source=False;self.related=True
         self.failure=False;self.entered=None;self.release=None
     async def complete(self,messages,**kw):
-        self.calls.append(messages)
         data=wire_context(messages)
+        if data.get('task')=='group_plan':
+            self.stages.append('plan')
+            self.plan_calls.append(messages)
+            result=mock_group_plan(data)
+            result['participation_plan']['action']=self.plan_action
+            return result
+        self.calls.append(messages)
         anchor=data['current_message']
         if 'text' not in anchor:
+            self.stages.append('topic')
             if self.entered:self.entered.set()
             if self.release:await self.release.wait()
             if self.failure:raise ProviderError('test_topic_failure')
@@ -29,7 +38,8 @@ class TopicModel:
             return {'topic':{'summary':'大家在聊英雄联盟排位中的打野配合。','confidence':self.score,
                 'relevant_to_current':self.related,'anchor_message_id':anchor['message_id'],
                 'source_message_ids':[anchor['message_id'],'nonexistent' if self.invalid_source else other['message_id']]}}
-        return {'text':'这波打得还挺热闹。','mode':'text','confidence':.95,'participate':True}
+        self.stages.append('generation')
+        return {'text':'这波打得还挺热闹。','mode':'text'}
 
 
 def setup(rig,**changes):
@@ -52,12 +62,26 @@ async def test_high_topic_enters_actual_reply_and_lore_retrieval_with_separate_t
     assert last['group_topic']['confidence']==.91
     assert any(r['doc_id']==doc['id'] for r in last['lore'])
     records=engine.trajectories.list()['items']
-    assert {r['kind'] for r in records}=={'group_topic','group_decision'}
+    assert {r['kind'] for r in records}=={'group_plan','group_topic','group_decision'}
+    assert len(model.plan_calls)==1
+    assert model.stages==['plan','topic','generation']
+    assert [r['execution']['model_call'] for r in reversed(records)]==[1,2,3]
+    records=[r for r in records if r['kind']!='group_plan']
     assert all(r['group_topic']['status']=='accepted' for r in records)
     assert records[0]['group_topic']['trace_id']==records[1]['id']
     assert attach_delivery(engine,records)[1]['delivery']['state']=='not_applicable'
     raw=engine.trajectories._db.execute('SELECT refs FROM trajectories').fetchall()
     assert all('_topic_rows' not in r[0] for r in raw)
+
+
+@pytest.mark.asyncio
+async def test_observe_plan_does_not_spend_topic_or_generation_request(rig):
+    engine,_,model,_=setup(rig)
+    model.plan_action='observe'
+    reply=await engine.handle(event('他这波啥意思',event_id='1001'))
+    assert reply['mode']=='none' and reply['reason']=='conversation_observed'
+    assert model.stages==['plan'] and model.calls==[]
+    assert [r['kind'] for r in engine.trajectories.list()['items']]==['group_plan']
 
 
 @pytest.mark.asyncio
@@ -119,6 +143,7 @@ async def test_source_erasure_redacts_topic_text_and_ids_even_from_other_members
     await engine.handle(event('他这波啥意思',event_id='1001'))
     engine.memory.forget_me(SCOPE,'21000')
     for row in engine.trajectories.list()['items']:
+        if row['kind']=='group_plan':continue
         assert row['group_topic']['redacted']
         assert 'summary' not in row['group_topic'] and 'sources' not in row['group_topic']
         detail=engine.trajectories.get(row['id'],engine.content_root)
@@ -188,7 +213,8 @@ async def test_heat_forces_fresh_topic_despite_normal_switch_and_interval(rig):
         clock.advance(21)
     assert len(model.calls)==4
     assert sum('text' not in wire_context(c)['current_message'] for c in model.calls)==2
-    assert all(r['group_topic']['required_for_heat'] for r in engine.trajectories.list()['items'])
+    assert len(model.plan_calls)==2
+    assert all(r['group_topic']['required_for_heat'] for r in engine.trajectories.list()['items'] if r['kind']!='group_plan')
 
 
 @pytest.mark.asyncio

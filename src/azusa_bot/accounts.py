@@ -17,6 +17,7 @@ from .native_process import terminate_helper
 import threading
 import time
 import uuid
+import unicodedata
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -103,11 +104,56 @@ class AccountRegistry:
 
 
 def managed_qq_ids(root):
-    """Trusted configured bot accounts, used to prevent mutual reply loops."""
+    """Trusted configured bot accounts, used to bound peer interaction."""
     registry = AccountRegistry(root)
     roots = [registry.manager_root, *(registry.child_root(row["id"]) for row in registry.read())]
     return {settings.onebot_self_id for directory in roots
             if (settings := read_settings(directory)).transport == "onebot" and settings.onebot_self_id}
+
+
+def managed_bot_names(root) -> dict[str, tuple[str, ...]]:
+    """Read active managed role names without initializing another account."""
+    from .group_addressing import address_names
+    registry = AccountRegistry(root)
+    roots = [registry.manager_root, *(registry.child_root(row["id"]) for row in registry.read())]
+    result = {}
+    for directory in roots:
+        settings = read_settings(directory)
+        if settings.transport != "onebot" or not re.fullmatch(r"[1-9][0-9]{0,19}",settings.onebot_self_id):
+            continue
+        names = ()
+        try:
+            path = directory / "data/profiles.json"
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 256*1024:
+                raise ValueError()
+            descriptor = safe_open(path,os.O_RDONLY | NOFOLLOW)
+            with os.fdopen(descriptor,"r",encoding="utf-8") as stream:
+                source = stream.read(256*1024+1)
+            if len(source) > 256*1024:
+                raise ValueError()
+            data = json.loads(source)
+            if (not isinstance(data,dict) or data.get("schema") != 1
+                    or not isinstance(data.get("profiles"),list) or not 1 <= len(data["profiles"]) <= 32):
+                raise ValueError()
+            ids = [row["id"] for row in data["profiles"]]
+            if (any(not isinstance(number,str) or not re.fullmatch(r"default|[a-f0-9]{32}",number) for number in ids)
+                    or len(set(ids)) != len(ids) or "default" not in ids or data.get("active_id") not in ids):
+                raise ValueError()
+            active = next(row for row in data["profiles"] if row["id"] == data["active_id"])
+            aliases = address_names(active.get("address_names",[]))
+            display = active["name"]
+            if (not isinstance(display,str) or not 1 <= len(display.strip()) <= 60
+                    or any(unicodedata.category(c).startswith("C") for c in display)):
+                raise ValueError()
+            # Keep administrator spelling while collapsing compatibility forms.
+            unique = {}
+            for name in [*aliases,display.strip()]:
+                unique.setdefault(unicodedata.normalize("NFKC",name).casefold(),name)
+            names = tuple(unique.values())
+        except (OSError,ValueError,KeyError,TypeError,UnicodeError):
+            pass
+        result[settings.onebot_self_id] = names
+    return result
 
 
 def assert_account_available(root, qq_number):

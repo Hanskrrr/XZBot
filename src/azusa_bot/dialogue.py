@@ -4,7 +4,9 @@ Independent of long-term memory consent and unsolicited participation limits.
 No historical database search or cross-member fallback is performed here.
 """
 from collections import OrderedDict
+from copy import deepcopy
 import re
+from .group_chat import GroupConversation
 
 
 def requests_repeat(text):
@@ -46,11 +48,14 @@ class RecentDialogue:
         rows = self.turns.setdefault(key, [])
         if any(turn[0]['message_id'] == pending['event_id'] for turn in rows):
             return
+        observation = GroupConversation.observation_metadata(pending.get('observation'), scope=pending['scope'])
         rows.append([
             {'role':'user', 'user_id':pending['user_id'], 'message_id':pending['event_id'],
-             'text':pending['user_text'], 'at':pending['user_at']},
+             'text':pending['user_text'], 'at':pending['user_at'],
+             **({'mention_only':True} if pending.get('mention_only') else {}), **observation},
             {'role':'assistant', 'user_id':pending['self_id'], 'message_id':message_id,
-             'text':pending['text'], 'mode':pending.get('mode', 'text'), 'at':self.clock()},
+             'text':pending['text'], 'mode':pending.get('mode', 'text'), 'at':self.clock(),
+             'response_to_message_id':pending['event_id']},
         ])
         del rows[:-self.MAX_TURNS]
         self.turns.move_to_end(key)
@@ -74,7 +79,7 @@ class RecentDialogue:
         turns = [turn for turn in self.turns.get((scope, user), [])
                  if 0 <= now-turn[0]['at'] < ttl_seconds]
         # Drop whole turns; never retain a detached old answer as current context.
-        return [dict(row, age_seconds=max(0, int(now-row['at'])))
+        return [dict(deepcopy(row), age_seconds=max(0, int(now-row['at'])))
                 for turn in turns[-max(1, limit//2):] for row in turn]
 
     def clear(self, scope=None):

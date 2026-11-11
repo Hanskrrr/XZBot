@@ -7,6 +7,8 @@ opt-outs, event hashes and reserved/sent counters are persisted; chat text is no
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
+from weakref import WeakValueDictionary
 from collections import OrderedDict, deque
 from contextlib import contextmanager
 import hashlib
@@ -18,9 +20,16 @@ import threading
 import time
 from typing import Callable
 import uuid
+from .message_privacy import hidden_message
+
+
+OBSERVATION_KEYS = ('mentions', 'mention_metadata_available', 'mentions_everyone',
+                    'reply_to_id', 'quote_status', 'quoted_message', 'response_to_message_id')
 
 
 class GroupConversation:
+    PEER_REPLY_LIMIT = 1
+
     def __init__(self, path: str | Path, *, max_scopes: int = 64, max_messages: int = 100,
                  max_members: int = 128, ttl_seconds: float = 7200,
                  max_text_chars: int = 2000, clock: Callable[[], float] = time.time):
@@ -40,7 +49,7 @@ class GroupConversation:
         self._rooms: OrderedDict[str, dict] = OrderedDict()
         self._revision = 0
         self._scope_limits = OrderedDict()
-        self._locks = [asyncio.Lock() for _ in range(64)]
+        self._locks = WeakValueDictionary()
         with self.db() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS group_members (
@@ -58,6 +67,8 @@ class GroupConversation:
                 CREATE TABLE IF NOT EXISTS group_heat_replies (id TEXT PRIMARY KEY,scope TEXT NOT NULL,at REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS group_silence (scope TEXT PRIMARY KEY, since REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS group_activity (scope TEXT PRIMARY KEY,at REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS group_peer_turns (
+                    scope TEXT PRIMARY KEY,epoch TEXT NOT NULL,used INTEGER NOT NULL);
                 CREATE INDEX IF NOT EXISTS group_reply_scope ON group_replies(scope,at);
                 CREATE INDEX IF NOT EXISTS group_member_seen ON group_members(scope,last_seen);
             """)
@@ -169,25 +180,107 @@ class GroupConversation:
         if not isinstance(text,str) or not text.strip() or len(text) > self.max_text_chars:
             return False
         text = text.strip()
-        if text.startswith(("/", "!", "！")):
+        if hidden_message(text) or text.startswith(("/", "!", "！")):
             return False
         if self.contains_credentials(text):
             return False
         return not any(ord(c) < 32 and c not in "\n\t" for c in text)
 
+    @staticmethod
+    def observation_metadata(observation, *, scope='', max_text_chars=2000):
+        """Copy bounded native evidence; text never manufactures a mention.
+
+        This deliberately omits inferred targets, quote-origin archives and
+        arbitrary fields from the current-message envelope. Missing bridge
+        metadata means unknown, not a verified empty mention list.
+        """
+        if not isinstance(observation, dict):
+            return {}
+        result = {'mention_metadata_available': False, 'mentions': [], 'mentions_everyone': False}
+        mentions = observation.get('mentions')
+        if observation.get('mention_metadata_available') is True and isinstance(mentions, list) and len(mentions) <= 20:
+            seen = set()
+            for member in mentions:
+                if (not isinstance(member, dict) or not isinstance(member.get('user_id'), str)
+                        or not re.fullmatch(r'[1-9][0-9]{0,19}', member['user_id'])
+                        or member['user_id'] in seen):
+                    break
+                seen.add(member['user_id'])
+                name = member.get('display_name', '')
+                name = ''.join(c for c in name if ord(c) >= 32)[:80] if isinstance(name, str) else ''
+                if GroupConversation.contains_credentials(name):
+                    name = '（昵称已隐藏）'
+                name_source = member.get('name_source')
+                result['mentions'].append({'user_id': member['user_id'], 'display_name': name,
+                    'name_source': name_source if isinstance(name_source, str) and name_source in
+                        {'group_member_info', 'recent_group', 'unavailable'} else 'unavailable',
+                    'is_self': member.get('is_self') is True})
+            else:
+                result['mention_metadata_available'] = True
+                result['mentions_everyone'] = observation.get('mentions_everyone') is True
+            if not result['mention_metadata_available']:
+                result['mentions'] = []
+        reply_to = observation.get('reply_to_id')
+        if not isinstance(reply_to, str) or not re.fullmatch(r'-?[0-9]{1,20}', reply_to):
+            return result
+        result.update(reply_to_id=reply_to, quote_status='unavailable')
+        quote = observation.get('quoted_message')
+        if not isinstance(quote, dict) or observation.get('quote_status') != 'resolved':
+            return result
+        expected = scope.rsplit(':', 2)[-2:] if scope else None
+        body = quote.get('text')
+        if (quote.get('message_id') != reply_to or not isinstance(quote.get('user_id'), str)
+                or not re.fullmatch(r'[1-9][0-9]{0,19}', quote['user_id'])
+                or not isinstance(quote.get('kind'), str) or quote['kind'] not in {'group', 'dm'}
+                or not isinstance(quote.get('scope_id'), str)
+                or expected is not None and expected != [quote.get('kind'), quote.get('scope_id')]
+                or not isinstance(body, str) or hidden_message(body)
+                or body.lstrip().startswith(('/', '!', '！'))
+                or GroupConversation.contains_credentials(body)
+                or any(ord(c) < 32 and c not in '\n\t' for c in body)):
+            return result
+        clean = {key: quote[key] for key in ('message_id', 'user_id', 'kind', 'scope_id')}
+        clean['text'] = body[:max_text_chars]
+        if len(body) > max_text_chars:
+            clean['text_truncated'] = True
+        if isinstance(quote.get('role'), str) and quote['role'] in {'user', 'assistant'}:
+            clean['role'] = quote['role']
+        if type(quote.get('sent_at')) is int and quote['sent_at'] >= 0:
+            clean['sent_at'] = quote['sent_at']
+        media = quote.get('media_types')
+        if isinstance(media, list):
+            clean['media_types'] = [item for item in media[:4] if isinstance(item, str) and item in {'image', 'record', 'video', 'file'}]
+        result.update(quoted_message=clean, quote_status='resolved')
+        return result
+
     def add(self, scope: str, user_id: str, text: str, message_id: str,
-            display_name: str = "", role: str = "user") -> int | None:
+            display_name: str = "", role: str = "user", *, is_bot: bool = False, mention_only: bool = False,
+            observation: dict | None = None, response_to_message_id: str | None = None) -> int | None:
         """Add one trusted event; return new revision, None if filtered/duplicate.
 
         Add assistant/bot text only after confirmed delivery, never on generation.
         Both assistant and user events are deduplicated by scope+role+message ID.
+        A trusted peer bot retains role=user so it cannot impersonate this bot's
+        confirmed assistant turns. Its marker is supplied by the account registry.
         """
         self._id(scope); self._id(user_id); self._id(message_id)
         role = "assistant" if role == "bot" else role
         if role not in {"user", "assistant"}:
             raise ValueError("Unsupported group role")
-        if not self.acceptable(text):
+        if not isinstance(is_bot, bool):
+            raise ValueError("Invalid bot identity")
+        # An explicit native @self has conversational meaning without prose.
+        # Retain its event marker only in the bounded ephemeral transcript.
+        if mention_only and (role!='user' or is_bot or not isinstance(text,str) or text.strip()):
+            raise ValueError('Invalid mention-only event')
+        if not mention_only and not self.acceptable(text):
             return None
+        metadata = self.observation_metadata(observation, scope=scope, max_text_chars=self.max_text_chars)
+        if response_to_message_id is not None:
+            self._id(response_to_message_id)
+            if role != 'assistant':
+                raise ValueError('Only confirmed assistant speech has a response target')
+            metadata['response_to_message_id'] = response_to_message_id
         name = "".join(c for c in str(display_name) if ord(c) >= 32)[:100]
         if self.contains_credentials(name):
             name="（昵称已隐藏）"
@@ -198,23 +291,42 @@ class GroupConversation:
             self._prune_persistent(db,now)
             if self._opted_out(db,scope,user_id):
                 return None
+            quote = metadata.get('quoted_message')
+            if quote and self._opted_out(db, scope, quote['user_id']):
+                metadata.pop('quoted_message')
+                metadata['quote_status'] = 'unavailable'
+            for mention in metadata.get('mentions', []):
+                if self._opted_out(db, scope, mention['user_id']):
+                    mention.update(display_name='', name_source='unavailable')
             inserted = db.execute("INSERT OR IGNORE INTO group_seen VALUES (?,?,?,?)", (event_hash,scope,user_id,now)).rowcount
             if not inserted:
                 return None
-            if role == "user":
+            if role == "user" and not is_bot:
                 db.execute("""INSERT INTO group_members VALUES (?,?,?,?,?,1)
                     ON CONFLICT(scope,user_id) DO UPDATE SET display_name=excluded.display_name,
                     last_seen=excluded.last_seen,message_count=message_count+1""", (scope,user_id,name,now,now))
                 db.execute("DELETE FROM group_members WHERE scope=? AND user_id NOT IN (SELECT user_id FROM group_members WHERE scope=? ORDER BY last_seen DESC,rowid DESC LIMIT ?)",
                            (scope,scope,self.max_members))
                 db.execute("DELETE FROM group_members WHERE scope NOT IN (SELECT scope FROM group_members GROUP BY scope ORDER BY MAX(last_seen) DESC,MAX(rowid) DESC LIMIT ?)", (self.max_scopes,))
+                # Only a newly accepted human message rearms peer interaction.
+                # Content expiry, receipt ACKs and bot messages never refund it.
+                if self._peer_budget(db, scope)["allowed"] or db.execute(
+                        "SELECT 1 FROM group_peer_turns WHERE scope=?", (scope,)).fetchone():
+                    db.execute("""INSERT INTO group_peer_turns VALUES (?,?,0)
+                        ON CONFLICT(scope) DO UPDATE SET epoch=excluded.epoch,used=0""",
+                        (scope, uuid.uuid4().hex))
             else:
-                db.execute("INSERT INTO group_silence VALUES (?,?) ON CONFLICT(scope) DO UPDATE SET since=excluded.since",(scope,now))
-                db.execute("INSERT INTO group_activity VALUES (?,?) ON CONFLICT(scope) DO UPDATE SET at=excluded.at",(scope,now))
-                db.execute("DELETE FROM group_activity WHERE scope NOT IN (SELECT scope FROM group_activity ORDER BY at DESC LIMIT ?)",(self.max_scopes,))
+                if role == "assistant":
+                    db.execute("INSERT INTO group_silence VALUES (?,?) ON CONFLICT(scope) DO UPDATE SET since=excluded.since",(scope,now))
+                    db.execute("INSERT INTO group_activity VALUES (?,?) ON CONFLICT(scope) DO UPDATE SET at=excluded.at",(scope,now))
+                    db.execute("DELETE FROM group_activity WHERE scope NOT IN (SELECT scope FROM group_activity ORDER BY at DESC LIMIT ?)",(self.max_scopes,))
+                else:
+                    db.execute("DELETE FROM group_members WHERE scope=? AND user_id=?", (scope,user_id))
             room = self._rooms.setdefault(scope,{"messages":deque(),"version":0})
             room["messages"].append({"user_id":user_id,"display_name":name,"message_id":message_id,
-                                     "text":text.strip(),"role":role,"at":now})
+                                     "text":text.strip(),"role":role,"at":now,
+                                     **({"is_bot":True} if is_bot else {}),
+                                     **({'mention_only':True} if mention_only else {}), **metadata})
             while len(room["messages"]) > self._scope_limits.get(scope,(self.max_messages,self.ttl_seconds))[0]:
                 room["messages"].popleft()
             members = list(dict.fromkeys(row["user_id"] for row in reversed(room["messages"])))
@@ -241,8 +353,8 @@ class GroupConversation:
             if not room:
                 return []
             max_messages,scope_ttl=self._scope_limits.get(scope,(self.max_messages,self.ttl_seconds))
-            rows = [dict(row, age_seconds=max(0, int(now-row["at"]))) for row in room["messages"]
-                    if now-row["at"] < min(ttl,scope_ttl)]
+            rows = [dict(deepcopy(row), age_seconds=max(0, int(now-row["at"]))) for row in room["messages"]
+                    if now-row["at"] < min(ttl,scope_ttl) and not hidden_message(row["text"])]
             return rows[-min(limit,max_messages):]
 
     def heat(self, scope, settings):
@@ -256,7 +368,7 @@ class GroupConversation:
         rows=self.snapshot(scope,limit=100,ttl_seconds=window)
         seen=set(); counts={}
         for row in rows:
-            if row['role']!='user':continue
+            if row['role']!='user' or row.get('is_bot'):continue
             text=re.sub(r'\s+','',row['text']).casefold()
             if len(text)<2 or text=='[用户发送图片]':continue
             key=(row['user_id'],text)
@@ -307,7 +419,11 @@ class GroupConversation:
 
     def lock(self, scope: str) -> asyncio.Lock:
         self._id(scope)
-        return self._locks[hash(scope) % len(self._locks)]
+        lock=self._locks.get(scope)
+        if lock is None:
+            lock=asyncio.Lock()
+            self._locks[scope]=lock
+        return lock
 
     def _remove_user_locked(self, db, scope, user_id):
         db.execute("DELETE FROM group_members WHERE scope=? AND user_id=?", (scope,user_id))
@@ -315,9 +431,19 @@ class GroupConversation:
         room = self._rooms.get(scope)
         if room:
             kept = deque(row for row in room["messages"] if row["user_id"] != user_id)
+            changed = len(kept) != len(room['messages'])
+            for row in kept:
+                if row.get('quoted_message', {}).get('user_id') == user_id:
+                    row.pop('quoted_message')
+                    row['quote_status'] = 'unavailable'
+                    changed = True
+                for mention in row.get('mentions', []):
+                    if mention['user_id'] == user_id and mention.get('display_name'):
+                        mention.update(display_name='', name_source='unavailable')
+                        changed = True
             if not kept:
                 self._rooms.pop(scope,None)
-            elif len(kept) != len(room["messages"]):
+            elif changed:
                 room.update(messages=kept,version=self._next())
 
     def remove_user(self, scope: str, user_id: str):
@@ -350,6 +476,45 @@ class GroupConversation:
         with self.db() as db:
             rows = db.execute("SELECT * FROM group_members WHERE scope=? ORDER BY last_seen DESC LIMIT ?", (scope,min(limit,self.max_members))).fetchall()
             return [dict(row) for row in rows if not self._opted_out(db,scope,row["user_id"])]
+
+    def _peer_budget(self, db, scope):
+        row = db.execute("SELECT epoch,used FROM group_peer_turns WHERE scope=?", (scope,)).fetchone()
+        capacity = row is not None or db.execute("SELECT COUNT(*) FROM group_peer_turns").fetchone()[0] < self.max_scopes*4
+        return {"epoch":row["epoch"] if row else "", "used":row["used"] if row else 0,
+                "limit":self.PEER_REPLY_LIMIT, "allowed":capacity and (row is None or row["used"] < self.PEER_REPLY_LIMIT)}
+
+    def peer_budget(self, scope: str) -> dict:
+        """One shortcut reply per account/profile/group until human input.
+
+        Durable counters contain no chat text, never expire and are not refunded
+        after uncertain delivery. Exhaustion disables the shortcut, not ordinary
+        group participation. Full capacity refuses new shortcut scopes.
+        """
+        self._id(scope)
+        with self.db() as db:
+            return self._peer_budget(db, scope)
+
+    def reserve_peer_reply(self, scope: str, epoch: str) -> bool:
+        """Reserve before send, refusing a stale generation after human input."""
+        self._id(scope)
+        if not isinstance(epoch, str):
+            raise ValueError("Invalid peer epoch")
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            state = self._peer_budget(db, scope)
+            if not state["allowed"] or state["epoch"] != epoch:
+                return False
+            db.execute("""INSERT INTO group_peer_turns VALUES (?,?,1)
+                ON CONFLICT(scope) DO UPDATE SET used=used+1""", (scope,epoch))
+            return True
+
+    def peer_epoch_current(self, scope: str, epoch: str) -> bool:
+        self._id(scope)
+        if not isinstance(epoch, str):
+            return False
+        with self.db() as db:
+            row = db.execute("SELECT epoch FROM group_peer_turns WHERE scope=?", (scope,)).fetchone()
+            return row["epoch"] == epoch if row else epoch == ""
 
     @staticmethod
     def _budget_args(cooldown_seconds, hour_limit, day_limit):

@@ -10,8 +10,10 @@ import pytest
 
 from azusa_bot.assets import AssetStore
 from azusa_bot.core import Incoming
+from azusa_bot.providers import mock_group_plan
 from azusa_bot.profiles import ProfileEngineManager
 from azusa_bot.settings import Settings, private_write, write_settings
+from context_helpers import context as wire_context
 
 SCOPE = "onebot:10001:group:30001"
 
@@ -31,11 +33,20 @@ def event(text="今天好开心", **values):
 class Provider:
     def __init__(self, asset):
         self.calls = []
+        self.plan_calls = []
         self.entered = self.release = None
         self.answer = dict(mode="image", asset_id=asset["id"], text="太开心了！", participate=True,
                            continuation=True, confidence=.95)
 
     async def complete(self, messages, **kwargs):
+        data = wire_context(messages)
+        if data.get('task') == 'group_plan':
+            self.plan_calls.append(messages)
+            planned = mock_group_plan(data)
+            planned['confidence'] = self.answer['confidence']
+            if self.answer.get('participate') is False:
+                planned['participation_plan']['action'] = 'observe'
+            return planned
         self.calls.append(messages)
         if self.entered:
             self.entered.set()
@@ -183,7 +194,8 @@ async def test_image_never_bypasses_group_silence_decision(rig):
     manager, _, provider = rig
     provider.answer["participate"] = False
     reply = await manager.handle(event(kind="group",scope_id="30001",unprompted=True))
-    assert reply["mode"] == "none" and reply["reason"] == "chose_silence"
+    assert reply["mode"] == "none" and reply["reason"] == "conversation_observed"
+    assert len(provider.plan_calls) == 1 and not provider.calls
     assert not list((manager.root / "data/media").glob("*.png"))
 
 

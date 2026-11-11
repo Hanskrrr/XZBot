@@ -11,7 +11,7 @@ import re
 import time
 from .prompts import prompt
 from .providers import ProviderError
-from .group_chat import GroupConversation
+from .group_chat import GroupConversation, OBSERVATION_KEYS
 from . import lore
 
 STATUSES={'accepted','low_confidence','unrelated','invalid','invalid_sources','insufficient_context',
@@ -92,7 +92,8 @@ async def prepare(engine,provider,messages,settings,kwargs):
             or type(at) not in (int,float) or time.time()-at>meta['window_seconds']
             or not isinstance(row.get('text'),str) or not row['text'].strip()
             or GroupConversation.contains_credentials(row['text'])):continue
-        rows.append({k:row[k] for k in ('message_id','user_id','text','at','age_seconds')})
+        # Peer speech is conversation evidence too; retain its trusted identity.
+        rows.append({k:deepcopy(row[k]) for k in ('message_id','user_id','text','at','age_seconds','is_bot') + OBSERVATION_KEYS if k in row})
     rows=rows[-meta['message_limit']:]
     meta['message_count']=len(rows)
     if len(rows)<3 or len({r['user_id'] for r in rows})<2 or anchor.get('message_id') not in {r['message_id'] for r in rows}:
@@ -110,6 +111,9 @@ async def prepare(engine,provider,messages,settings,kwargs):
     topic_data={'current_message':{k:anchor[k] for k in ('kind','message_id','user_id')},
         'recent_group_messages':clipped,'latest_speaker_id':anchor['user_id'],
         'latest_speaker_own_memories':[],'available_expressions':[],'lore':[]}
+    if anchor.get('is_bot') is True:
+        topic_data['current_message']['is_bot']=True
+    topic_data['current_message'].update(GroupConversation.observation_metadata(anchor, scope=kwargs['scope']))
     topic_refs=references(group_context=clipped,source_event_id=anchor['message_id'])
     topic_refs['_text_preview_allowed']=refs.get('_text_preview_allowed',True)
     topic_messages=[{'role':'system','content':prompt(engine.content_root,'topic_analysis',settings)},
@@ -117,7 +121,8 @@ async def prepare(engine,provider,messages,settings,kwargs):
     try:
         answer=await engine._complete_traced_once(provider,topic_messages,settings,kind='group_topic',
             trigger=kwargs['trigger'],scope=kwargs['scope'],user=kwargs['user'],refs=topic_refs,
-            context_generation=generation,request_text=kwargs.get('request_text'))
+            context_generation=generation,request_text=kwargs.get('request_text'),
+            execution=engine._execution_budget_context.get())
     except ProviderError as exc:
         if str(exc) in {'privacy_context_changed','bot_stopped'}:raise
         meta['status']='unavailable'

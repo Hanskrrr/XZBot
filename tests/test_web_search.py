@@ -8,7 +8,8 @@ import pytest
 
 from azusa_bot import web_search
 from azusa_bot.core import Engine, Incoming
-from azusa_bot.providers import ProviderError
+from azusa_bot.providers import ProviderError, mock_group_plan
+from context_helpers import context as wire_context
 from azusa_bot.settings import Settings, write_settings, private_write
 from azusa_bot.trajectory_admin import attach_delivery
 
@@ -50,8 +51,14 @@ async def test_upstream_failure_does_not_expose_response_or_key():
 
 
 class Model:
-    def __init__(self):self.calls=[];self.confidence=.95
+    def __init__(self):self.calls=[];self.plan_calls=[];self.confidence=.95
     async def complete(self,messages,**kwargs):
+        data=wire_context(messages)
+        if data.get('task')=='group_plan':
+            self.plan_calls.append(messages)
+            answer=mock_group_plan(data)
+            answer['confidence']=self.confidence
+            return answer
         self.calls.append(messages)
         data=json.loads(messages[1]["content"].split("\n",1)[1])
         if "web_evidence" not in data:
@@ -153,8 +160,11 @@ async def test_configured_confidence_controls_search_and_send(rig,threshold,shou
     settings.group_chat_confidence_threshold=threshold;write_settings(engine.root,settings)
     reply=await engine.handle(event(mentioned=False,unprompted=True))
     assert bool(calls)==should_search and (reply["mode"]=="text")==should_search
-    decision=engine.trajectories.list(kind="group_decision")["items"][0]
+    decision=engine.trajectories.list(kind="group_plan")["items"][0]
     assert decision["confidence_threshold"]==threshold
+    assert decision['confidence']==.65
+    assert len(model.plan_calls)==1
+    assert bool(model.calls)==should_search
 
 
 def test_search_budget_is_persistent_and_also_consumes_cloud_quota(rig):

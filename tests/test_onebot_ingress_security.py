@@ -52,3 +52,25 @@ async def test_authenticated_reverse_websocket_remains_usable():
     async with bot.server_app.test_client().websocket("/ws", headers=headers) as ws:
         await ws.send("not-json")
 
+
+
+@pytest.mark.asyncio
+async def test_hidden_messages_dropped_before_astrbot_conversion(monkeypatch):
+    pytest.importorskip('astrbot')
+    from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_platform_adapter import AiocqhttpAdapter
+    original=AsyncMock(return_value='converted')
+    monkeypatch.setattr(AiocqhttpAdapter,'convert_message',original)
+    monkeypatch.setattr(AiocqhttpAdapter,'__init__',lambda *a,**k:None)
+    monkeypatch.setattr(AiocqhttpAdapter,'_xzbot_ws_only',False,raising=False)
+    guard.install_adapter_guard()
+    adapter=object()
+    event={'post_type':'message','message':[
+        {'type':'at','data':{'qq':'10001'}},
+        {'type':'text','data':{'text':' \n（'}},
+        {'type':'text','data':{'text':'（不该解析附件'}},
+        {'type':'image','data':{'url':'https://not-fetched.invalid/image.jpg'}}]}
+    assert await AiocqhttpAdapter.convert_message(adapter,event) is None
+    original.assert_not_called()
+    event['message']=[{'type':'text','data':{'text':'正常聊天'}}]
+    assert await AiocqhttpAdapter.convert_message(adapter,event)=='converted'
+    original.assert_awaited_once_with(adapter,event)

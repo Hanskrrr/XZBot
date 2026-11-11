@@ -1,7 +1,7 @@
 """Recent public group turns can be continued by a different member, not by keyword fiat."""
 import asyncio
 import pytest
-from test_group_followup import rig, event, configure, calls, start, SCOPE
+from test_group_followup import rig, event, configure, calls, plans, start, SCOPE
 from context_helpers import context, dialogue
 from azusa_bot.prompts import describe, save
 
@@ -52,7 +52,11 @@ async def test_no_spurious_cross_member_entry(rig,condition):
     if condition=='own_cap':e._group_threads[(SCOPE,'20001')]['turns']=s.group_followup_max_turns
     kwargs=dict(user_id='20001' if condition=='own_cap' else '20002',event_id='candidate')
     if condition=='other_group':kwargs['scope_id']='30002'
-    if condition=='other_mention':kwargs['other_mentioned']=True
+    if condition=='other_mention':
+        kwargs['other_mentioned']=True
+        # The mention is evidence for semantic assessment, not a hard recipient
+        # rule. This fixture explicitly judges the question as aimed elsewhere.
+        p.followup_reply=dict(p.followup_reply,continuation=False)
     result=await e.handle(event('今天好热' if condition=='no_cue' else '你觉得呢',**kwargs))
     assert result['mode']=='none'
     assert not calls(p,'followup')
@@ -62,11 +66,11 @@ async def test_pronoun_can_refer_to_another_member_and_not_reopen_repeatedly(rig
     e,s,p,clock=rig;await open_turn(rig)
     e.groups.add(SCOPE,'20003','我下周去旅游','other-question')
     p.followup_reply={'participate':False,'continuation':False,'confidence':.98,'text':''}
-    assert (await e.handle(event('你去哪',user_id='20002',event_id='1')))['reason']=='followup_not_for_bot'
-    assert len(calls(p,'followup'))==1
+    assert (await e.handle(event('你去哪',user_id='20002',event_id='1')))['reason']=='conversation_observed'
+    assert len(plans(p,'followup'))==1 and calls(p,'followup')==[]
     clock.advance(6)
     assert (await e.handle(event('你哪天去',user_id='20002',event_id='2')))['mode']=='none'
-    assert len(calls(p,'followup'))==1
+    assert len(plans(p,'followup'))==1 and calls(p,'followup')==[]
 
 
 async def test_handoff_still_honors_vote_threshold_and_privacy_cancellation(rig):

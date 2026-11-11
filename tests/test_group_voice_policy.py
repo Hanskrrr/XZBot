@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from azusa_bot.core import Ledger
 from azusa_bot.group_voice import GroupVoice
 from azusa_bot.group_policies import create_router, save_policy, revision, read
-from azusa_bot.providers import ProviderError
+from azusa_bot.providers import ProviderError, mock_group_plan
 from azusa_bot.settings import Settings, write_settings
 from test_group_voice import rig, event, SCOPE
 
@@ -43,7 +43,14 @@ async def test_off_covers_every_route_without_synthesis(rig,route):
             s.group_chat_min_messages=1;write_settings(e.root,s)
         kwargs={'event_id':'2'}
         if route in ('direct','command'):kwargs['mentioned']=True
-        if route=='handoff':kwargs['user_id']='20002'
+        if route=='handoff':
+            kwargs['user_id']='20002'
+            def public_handoff(data):
+                answer=mock_group_plan(data)
+                answer['participation_plan'].update(action='reply',target='self',addressee_ids=['10001'],
+                    response_to_message_id='90001',thread_anchor='1',evidence_message_ids=['1','90001','2'])
+                return answer
+            p.plan_answer=public_handoff
         text={'direct':'你好','command':'/语音 在吗','named':'阿梓，在吗','passive':'聊什么好呢','followup':'下一步呢','handoff':'你说的什么意思'}[route]
         result=await e.handle(event(text,**kwargs))
     assert result['mode']=='text' and p.speech==[]

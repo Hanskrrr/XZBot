@@ -111,11 +111,17 @@ async def test_long_persona_above_half_window_still_retries_with_optional_contex
     engine, provider, settings = rig
     # Fixed instructions alone exceed half the window, so the half-window
     # target is unreachable; recovery must still drop the optional history.
+    # Leave more than the final protected turn at initial fitting: mandatory
+    # prompt growth otherwise already removes everything retry could discard.
+    settings.context_window_tokens = 40960
+    write_settings(engine.root, settings)
     private_write(engine.content_root/"content/persona.md","完整核心设定"*350)
     seed(engine); provider.errors = ["context_length_exceeded"]
     reply = await engine.handle(event())
-    assert reply["mode"] == "text" and len(provider.calls) == 2
+    assert reply["mode"] == "text" and len(provider.calls) == 2, (
+        reply, len(dialogue(provider.calls[0][0])), engine.trajectories.list()['items'][0].get('context_budget'))
     first,second = (call[0] for call in provider.calls)
+    assert len(dialogue(first)) > 2
     assert first[0] == second[0] and "完整核心设定"*350 in second[0]["content"]
     assert len(dialogue(second)) < len(dialogue(first))
     budget = engine.trajectories.list()["items"][0]["context_budget"]

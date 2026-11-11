@@ -13,6 +13,8 @@ from azusa_bot.app import create_app
 from azusa_bot.core import Engine, Incoming
 from azusa_bot.secrets import Credentials
 from azusa_bot.settings import Owner, Settings, read_settings, write_settings
+from azusa_bot.providers import mock_group_plan
+from context_helpers import context as wire_context
 
 
 SCOPE = "onebot:10001:group:30001"
@@ -21,8 +23,12 @@ SCOPE = "onebot:10001:group:30001"
 class OfflineProvider:
     def __init__(self):
         self.calls = []
+        self.plan_calls = []
 
     async def complete(self, messages, *, summary=False):
+        if not summary and wire_context(messages).get('task') == 'group_plan':
+            self.plan_calls.append(messages)
+            return mock_group_plan(wire_context(messages))
         self.calls.append(messages)
         return {"memories": []} if summary else {"text": "收到你的消息。", "mode": "text"}
 
@@ -195,3 +201,54 @@ def test_onebot_http_enable_requires_self_and_whitelist_but_chat_admin_is_option
             assert app.state.engine.memory.list_memories("onebot:10001:dm:20001", "20001") == []
     finally:
         app.state.engine.memory.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('participation',[False,True])
+@pytest.mark.parametrize('legacy_activity_only',[False,True])
+async def test_native_self_at_without_words_calls_role_and_preserves_empty_input(onebot,participation,legacy_activity_only):
+    from context_helpers import context
+    engine,settings,provider=onebot
+    settings.group_chat_enabled=participation
+    settings.group_chat_debounce_seconds=0
+    write_settings(engine.root,settings)
+    engine.memory.set_consent(SCOPE,'20001',True)
+    message=event(text='  ',mentioned_user_ids=['10001'],activity_only=legacy_activity_only)
+    reply=await engine.handle(message)
+    assert reply['mode']=='text' and len(provider.calls)==1,reply
+    current=context(provider.calls[0])['current_message']
+    assert current['text']=='' and current['mentioned'] is True and current['mention_only'] is True
+    assert current['sender']['user_id']=='20001' and current['bot_user_id']=='10001'
+    assert '没有附加文字' in provider.calls[0][0]['content']
+    assert engine.memory.recent_history(SCOPE,'20001')==[]
+    trace=engine.trajectories.list()['items'][0]
+    assert trace['request_kind']=='mention' and not trace['request_tail'] and trace['provider_called']
+    engine.acknowledge(reply['reply_id'],'sent','-8801')
+    dialogue=engine._dialogue_context(message,SCOPE,settings)
+    assert dialogue[0]['mention_only'] is True and not dialogue[0]['text'].strip()
+    assert dialogue[1]['text']==reply['text']
+    assert (await engine.handle(message))['reason']=='duplicate_event'
+    assert len(provider.calls)==1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('ids,everyone',[([],False),(['20002'],False),([],True)])
+async def test_nonself_empty_activity_does_not_become_direct_call(onebot,ids,everyone):
+    engine,_,provider=onebot
+    reply=await engine.handle(event(text='',activity_only=True,mentioned=True,
+                                   mentioned_user_ids=ids,mentions_everyone=everyone))
+    assert reply['reason']=='activity_observed' and not provider.calls
+
+
+@pytest.mark.asyncio
+async def test_only_at_does_not_override_privacy_whitelist_or_limits(onebot):
+    engine,settings,provider=onebot
+    hidden=await engine.handle(event(text='（（别看这条',mentioned_user_ids=['10001']))
+    assert hidden['reason']=='message_hidden' and not engine.ledger.deliveries()
+    outside=await engine.handle(event(text='',scope_id='30002',mentioned_user_ids=['10001']))
+    assert outside['reason']=='group_not_allowed' and not provider.calls
+    settings.min_interval_seconds=60;write_settings(engine.root,settings)
+    first=await engine.handle(event(text='',mentioned_user_ids=['10001']))
+    assert first['mode']=='text'
+    again=await engine.handle(event(text='',event_id='event2',mentioned_user_ids=['10001']))
+    assert again['mode']=='none' and len(provider.calls)==1

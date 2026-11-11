@@ -5,14 +5,21 @@ import pytest
 
 from azusa_bot import lore
 from azusa_bot.core import Engine, Incoming
+from azusa_bot.providers import mock_group_plan
 from azusa_bot.settings import Settings, private_write, write_settings
+from context_helpers import context as wire_context
 
 
 class Provider:
     def __init__(self):
         self.calls=[]
+        self.plan_calls=[]
 
     async def complete(self,messages,**kwargs):
+        data=wire_context(messages)
+        if data.get('task')=='group_plan':
+            self.plan_calls.append(messages)
+            return mock_group_plan(data)
         self.calls.append(messages)
         return {"text":"今天过得如何？" if len(self.calls)==1 else "那我们接着聊。", "mode":"text",
                 "participate":True,"confidence":.95,"continuation":True}
@@ -76,6 +83,8 @@ async def test_proactive_group_and_no_mention_followup_both_include_full_documen
     assert second["mode"]=="text"
     check_full(provider.calls[-1],texts)
     assert len(provider.calls)==2
+    assert len(provider.plan_calls)==2
+    assert all('FULL_BEGIN_' not in str(messages) for messages in provider.plan_calls)
 
 
 @pytest.mark.asyncio

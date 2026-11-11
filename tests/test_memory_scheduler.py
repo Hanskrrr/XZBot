@@ -144,6 +144,9 @@ async def test_scheduler_rechecks_scope_after_waiting_for_capacity(scheduled, re
         def __init__(self):
             self.entered, self.release = asyncio.Event(), asyncio.Event()
 
+        def locked(self):
+            return False
+
         async def __aenter__(self):
             self.entered.set()
             await self.release.wait()

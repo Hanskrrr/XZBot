@@ -4,7 +4,7 @@ const {execFileSync}=require('node:child_process');const root=path.resolve(__dir
 (async()=>{
  const defaults=JSON.parse(execFileSync(path.join(root,'.venv/bin/python'),['-c','from azusa_bot.settings import Settings;print(Settings().model_dump_json())'],{cwd:root,encoding:'utf8'}));
  const settings={...defaults,transport:'onebot',onebot_self_id:'10001',onebot_enabled:true,onebot_allowed_groups:['30001','30002'],provider_mode:'mock'};
- const a='onebot:10001:group:30001',b='onebot:10001:group:30002';let active='default',presets=[],revision=0,delay=false,release=null;
+ const a='onebot:10001:group:30001',b='onebot:10001:group:30002';let active='default',presets=[],revision=0,delay=false,release=null,legacySchema=false;
  const policy=Object.fromEntries(Object.entries(settings).filter(([k])=>/^group_/.test(k)&&k!=='group_idle_groups'));
  const policies={[a]:{...policy,group_chat_enabled:true,group_heat_enabled:true,group_idle_enabled:true,group_vote_enabled:true,group_vote_weight_understanding:70},[b]:{...policy,group_heat_enabled:false}};
  const calls=[],errors=[];let stamp=Date.now()/1000;
@@ -30,8 +30,14 @@ const {execFileSync}=require('node:child_process');const root=path.resolve(__dir
   else if(u.pathname==='/admin/memory/targets')result={scopes:[{scope:a,label:'测试群 A',kind:'group',members:[]},{scope:b,label:'测试群 B',kind:'group',members:[]}]};
   else if(u.pathname==='/admin/memory/status')result={stats:{},members:[],retention:{}};
   else if(u.pathname==='/admin/group-settings'){
-   const scope=body?.scope||u.searchParams.get('scope')||a;if(method==='PUT')policies[scope]={...body.settings};
-   result={scope,scopes:[{scope:a,label:'测试群 A'},{scope:b,label:'测试群 B'}],settings:policies[scope],voice:voice(scope),revision:'group-fixture',confidence:{silence_seconds:3600,effective:.72}};
+   const scope=body?.scope||u.searchParams.get('scope')||a;
+   const supported=Object.keys(policy).filter(key=>!legacySchema||key!=='group_chat_peer_echo_enabled');
+   if(method==='PUT'){
+    if(Object.keys(body.settings).some(key=>!supported.includes(key)))return route.fulfill({status:400,json:{detail:'unsupported_group_setting'}});
+    policies[scope]={...policies[scope],...body.settings};
+   }
+   const values=Object.fromEntries(Object.entries(policies[scope]).filter(([key])=>supported.includes(key)));
+   result={scope,scopes:[{scope:a,label:'测试群 A'},{scope:b,label:'测试群 B'}],settings:values,voice:voice(scope),revision:'group-fixture',confidence:{silence_seconds:3600,effective:.72}};
   }else if(u.pathname==='/admin/group-settings/status'){
    result=monitor(u.searchParams.get('scope'),profile);if(delay){delay=false;await new Promise(resolve=>release=resolve);}
   }else if(u.pathname.endsWith('/apply')&&u.pathname.startsWith('/admin/group-presets/')){
@@ -44,7 +50,13 @@ const {execFileSync}=require('node:child_process');const root=path.resolve(__dir
   }
   await route.fulfill({json:result,headers:{'X-XZBot-Profile':profile||active}});
  });
- const wait=(id,text)=>{step=id+': '+text;return page.waitForFunction(({id,text})=>document.getElementById(id).textContent.includes(text),{id,text});};
+ const wait=async(id,text)=>{step=id+': '+text;try{return await page.waitForFunction(({id,text})=>document.getElementById(id).textContent.includes(text),{id,text});}catch(error){
+  console.error('Synthetic form diagnostics:',JSON.stringify(await page.evaluate(id=>({state:document.getElementById(id)?.textContent,active:document.activeElement?.id,
+   thresholds:Object.fromEntries(['group-confidence','group-topic-confidence','group-decay-floor','group-decay-mode'].map(key=>[key,document.getElementById(key)?.value])),
+   invalid:[...document.getElementById('group-settings-form').elements].filter(input=>input.validity&&!input.validity.valid).map(input=>({id:input.id,value:input.value,validation:input.validationMessage})),
+   submitDisabled:document.querySelector('#group-settings-form button[type=submit]').disabled}),id)),'page errors:',JSON.stringify(errors));
+  await page.screenshot({path:'/tmp/xzbot-group-validation-failure.png'});throw error;
+ }};
  await page.goto('http://xzbot.test/#token=TEST_ONLY');await wait('desktop-state','已读取');
  assert(!calls.some(c=>c.path.endsWith('/status')&&c.path.includes('group-settings'))); // No background polling from overview.
  await page.locator('[data-tab="groups"]').click();await wait('group-observation-state','最近读取');
@@ -78,12 +90,54 @@ const {execFileSync}=require('node:child_process');const root=path.resolve(__dir
  await page.locator('#memory-target-scope').selectOption(a);await wait('group-settings-state','测试群 A');assert.equal(await page.locator('#group-voice-mode').inputValue(),'auto');await wait('group-voice-usage','已开始合成 2 次');
  await page.locator('#group-voice-mode').selectOption('off');await page.locator('#group-settings-form button[type=submit]').click();await wait('group-settings-state','已保存并生效');assert.equal(policies[a].group_voice_mode,'off');assert.equal(policies[b].group_voice_mode,'limited');
  await page.locator('#groups-view-reply').click();assert(await page.locator('#group-handoff-enabled').isChecked());await page.locator('#group-handoff-enabled').uncheck();await page.locator('#group-handoff-seconds').fill('45');await page.locator('#group-settings-form button[type=submit]').click();await wait('group-settings-state','已保存并生效');assert.equal(policies[a].group_followup_handoff_enabled,false);assert.equal(policies[a].group_followup_handoff_seconds,45);assert(policies[b].group_followup_handoff_enabled);
+ // Decimal thresholds must save on a phone, while invalid or conflicting values
+ // identify the exact field and never send a mutation, even from another subview.
+ step='mobile threshold precision and validation';await page.setViewportSize({width:390,height:844});
+ const beforeThresholds=structuredClone(policies[a]);
+ const groupWrites=()=>calls.filter(c=>c.path==='/admin/group-settings'&&c.method==='PUT');
+ const saveThresholds=async(base,topic)=>{
+  await page.locator('#groups-view-reply').click();await page.locator('#group-confidence').fill(String(base));
+  await page.locator('#groups-view-topic').click();await page.locator('#group-topic-confidence').fill(String(topic));
+  await page.locator('#groups-view-reply').click();
+  const count=groupWrites().length,saved=page.waitForResponse(r=>new URL(r.url()).pathname==='/admin/group-settings'&&r.request().method()==='PUT');
+  await page.locator('#group-settings-form button[type=submit]').click();await saved;await wait('group-settings-state','已保存并生效');
+  assert.equal(groupWrites().length,count+1);const body=groupWrites().at(-1).body;
+  assert.equal(body.settings.group_chat_confidence_threshold,base);assert.equal(body.settings.group_topic_confidence_threshold,topic);
+  assert.equal(policies[a].group_chat_confidence_threshold,base);assert.equal(policies[a].group_topic_confidence_threshold,topic);
+ };
+ await saveThresholds(.79,.8);await saveThresholds(.8,.79);
+ const validThresholdPolicy=structuredClone(policies[a]),validWrites=groupWrites().length;
+ await page.locator('#groups-view-topic').click();await page.locator('#group-topic-confidence').fill('1.01');await page.locator('#groups-view-reply').click();
+ await page.locator('#group-settings-form button[type=submit]').click();await wait('group-settings-state','话题置信度门槛');
+ assert(await page.locator('#group-topic-confidence').isVisible());assert.equal(groupWrites().length,validWrites);assert.deepEqual(policies[a],validThresholdPolicy);
+ await page.locator('#group-topic-confidence').fill('.79');await page.locator('#groups-view-reply').click();await page.locator('#group-confidence').fill('-.01');
+ await page.locator('#group-settings-form button[type=submit]').click();await wait('group-settings-state','接话门槛');assert.equal(groupWrites().length,validWrites);assert.deepEqual(policies[a],validThresholdPolicy);
+ await page.locator('#group-confidence').fill('.8');await page.locator('#group-decay-mode').selectOption('linear');await page.locator('#group-decay-floor').fill('.9');
+ await page.locator('#group-settings-form button[type=submit]').click();await wait('group-settings-state','最低门槛不能高于基础门槛');assert.equal(groupWrites().length,validWrites);assert.deepEqual(policies[a],validThresholdPolicy);
+ await page.locator('#group-decay-mode').selectOption(beforeThresholds.group_confidence_decay);await page.locator('#group-decay-floor').fill(String(beforeThresholds.group_confidence_floor));
+ await saveThresholds(beforeThresholds.group_chat_confidence_threshold,beforeThresholds.group_topic_confidence_threshold);assert.deepEqual(policies[a],beforeThresholds);
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);await page.setViewportSize({width:1280,height:1000});
  await page.locator('#groups-view-presets').click();
  await page.locator('.group-presets').screenshot({path:'/tmp/xzbot-group-presets-desktop.png'});
  await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);await page.locator('.group-presets').screenshot({path:'/tmp/xzbot-group-presets-mobile.png'});
  await page.locator('#groups-view-monitor').click();await page.locator('#group-observation').screenshot({path:'/tmp/xzbot-group-monitor-mobile.png'});
+ // A newer page must not add an unsupported default field to an older service.
+ step='new page with older running service';legacySchema=true;
+ await page.locator('#groups-view-reply').click();await page.locator('#reload-group-settings').click();await wait('group-settings-state','已载入');
+ assert(await page.locator('#group-peer-echo-enabled').isDisabled());
+ assert((await page.locator('#group-schema-note').innerText()).includes('其他设置可以正常保存'));
+ const beforeCompat=structuredClone(policies[a]);await page.locator('#group-confidence').fill('.77');
+ await page.locator('#group-settings-form button[type=submit]').click();await wait('group-settings-state','已保存并生效');
+ const compatBody=groupWrites().at(-1).body.settings;assert(!Object.hasOwn(compatBody,'group_chat_peer_echo_enabled'));
+ assert.equal(policies[a].group_chat_confidence_threshold,.77);
+ for(const [key,value] of Object.entries(beforeCompat))if(key!=='group_chat_confidence_threshold')assert.deepEqual(policies[a][key],value);
+ await page.locator('#groups-view-reply').click();await page.locator('#group-settings-fields').screenshot({path:'/tmp/xzbot-group-schema-compat.png'});
+ // Refreshing after the core is updated restores the new control.
+ legacySchema=false;await page.locator('#reload-group-settings').click();await wait('group-settings-state','已载入');
+ assert.equal(await page.locator('#group-peer-echo-enabled').isDisabled(),false);
+ assert(await page.locator('#group-schema-note').isHidden());
  await page.locator('[data-tab="knowledge"]').click();const stopped=reads();await page.waitForTimeout(5300);assert.equal(reads(),stopped);
  assert(!calls.some(c=>/\/simulate|\/bridge|\/claim|\/send/.test(c.path)));assert.deepEqual(errors,[]);
- console.log(JSON.stringify({passed:true,checks:['elapsed time','heat progress','5s local polling','inactive page stops polling','preset numbering','one-click apply','explicit draft vs live','no-op apply','template changes do not alter live groups','rename','profile sharing','target group isolation','delete keeps applied settings','stale response isolation','mobile layout','voice off/unlimited/limited and group isolation','cross-member handoff controls']}));
+ console.log(JSON.stringify({passed:true,checks:['elapsed time','heat progress','5s local polling','inactive page stops polling','preset numbering','one-click apply','explicit draft vs live','no-op apply','template changes do not alter live groups','rename','profile sharing','target group isolation','delete keeps applied settings','stale response isolation','mobile layout','voice off/unlimited/limited and group isolation','cross-member handoff controls','mobile hundredth-precision thresholds','invalid hidden field named and revealed without mutation','confidence floor conflict remains blocked']}));
  }finally{await browser.close();}
 })().catch(e=>{console.error('Group UI failed at '+step+': '+e.stack);process.exitCode=1;});

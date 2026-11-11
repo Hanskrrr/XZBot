@@ -11,9 +11,10 @@ import pytest
 from support_content import seed_content
 
 from azusa_bot.core import Engine, Incoming
-from azusa_bot.providers import ProviderError
+from azusa_bot.providers import ProviderError, mock_group_plan
 from azusa_bot.settings import Settings, write_settings
 from azusa_bot.trajectory_admin import attach_delivery
+from context_helpers import context as wire_context
 
 
 SCOPE = "onebot:10001:group:30001"
@@ -34,6 +35,7 @@ class Clock:
 class Provider:
     def __init__(self):
         self.calls = []
+        self.plan_calls = []
         self.direct_reply = {"text": "先把输入和输出列出来，我们一步一步看。", "mode": "text"}
         self.followup_reply = {"participate": True, "continuation": True, "confidence": .95,
                                "text": "接下来选一个具体数字，顺着计算走一遍。"}
@@ -44,12 +46,39 @@ class Provider:
         self.release = None
 
     async def complete(self, messages, *, summary=False):
+        data=wire_context(messages)
+        if data.get('task')=='group_plan':
+            recent=data.get('recent_conversation',[])
+            own=[row for row in recent if row.get('role')=='assistant']
+            quoted=data['current_message'].get('quoted_message',{})
+            direct=quoted.get('user_id')==data['self_id']
+            kind='direct' if direct else 'followup' if own else 'passive'
+            self.plan_calls.append({'kind':kind,'messages':messages})
+            answer=({'participate':True,'confidence':.95}|self.direct_reply) if direct else self.followup_reply if own else self.passive_reply
+            result=mock_group_plan(data)
+            # These fixtures explicitly supply the semantic assessment. They do
+            # not ask the deterministic mock to understand the scripted prose.
+            plan=result['participation_plan']
+            if own and not direct:
+                anchor=own[-1]
+                evidence=[data['current_message']['message_id'],anchor['message_id']]
+                question=anchor.get('response_to_message_id')
+                if question and any(row['message_id']==question for row in recent):evidence.append(question)
+                plan.update(target='self',addressee_ids=[data['self_id']],action='reply',
+                    response_to_message_id=anchor['message_id'],thread_anchor=question or anchor['message_id'],
+                    evidence_message_ids=list(dict.fromkeys(evidence)))
+            if (answer.get('participate') is not True or answer.get('continuation',True) is not True
+                    or '小王' in data['current_message']['text']):
+                plan.update(action='observe',reason='synthetic_other_conversation')
+            result.pop('confidence',None);result.pop('votes',None)
+            for key in ('confidence','votes'):
+                if key in answer:result[key]=answer[key]
+            return result
         if summary:
             kind = "summary"
         else:
             # Shared editable policies can mention continuation/participation
             # in every request. Classify the actual structured input envelope.
-            data=json.loads(messages[1]['content'].split('\n',1)[1])
             kind=('direct' if 'trusted_identity' in data else
                   'followup' if data.get('continuation_candidate') else
                   'passive')
@@ -60,8 +89,9 @@ class Provider:
             await self.release.wait()
         if kind == self.error_kind:
             raise ProviderError("deepseek_network_or_format")
-        return {"summary": {"memories": []}, "followup": self.followup_reply,
+        answer={"summary": {"memories": []}, "followup": self.followup_reply,
                 "passive": self.passive_reply, "direct": self.direct_reply}[kind]
+        return {key:value for key,value in answer.items() if key not in {'participate','continuation','confidence','votes'}}
 
     async def synthesize(self, text):
         raise AssertionError("These tests do not use speech services")
@@ -107,6 +137,10 @@ def calls(provider, kind):
     return [call for call in provider.calls if call["kind"] == kind]
 
 
+def plans(provider, kind):
+    return [call for call in provider.plan_calls if call['kind']==kind]
+
+
 async def start(engine, *, event_id="start", receipt="90001"):
     reply = await engine.handle(event("请帮我解释一下这道计算", mentioned=True, event_id=event_id))
     assert reply["mode"] == "text"
@@ -132,7 +166,13 @@ async def test_sliding_followup_window_does_not_keep_older_raw_turns(rig):
     provider.followup_reply=dict(provider.followup_reply,text="这一步的结果再传给下一层，就能继续算下去了。")
     third=await engine.handle(event("接着说吧",event_id="latest-turn"))
     assert third["mode"]=="text"
-    assert "old-turn" not in str(provider.calls[-1]["messages"])
+    data=wire_context(provider.calls[-1]['messages'])
+    assert 'old-turn' not in [row['message_id'] for row in data['recent_conversation']]
+    assert '请帮我解释一下这道计算' not in str(provider.calls[-1]['messages'])
+    # The public plan names retained evidence; internal thread identity may
+    # outlive an old raw message without reintroducing that message's content.
+    assert data['participation_plan']['thread_anchor']=='recent-turn'
+    assert 'old-turn' not in data['participation_plan']['evidence_message_ids']
 
 
 @pytest.mark.asyncio
@@ -149,13 +189,13 @@ async def test_delayed_ack_does_not_refresh_incoming_message_age(rig):
 
 @pytest.mark.parametrize("confidence,state,reason", [
     (.79,"valid","followup_low_confidence"),
-    (None,"missing","followup_confidence_invalid"),
-    ("0.95","invalid","followup_confidence_invalid"),
-    (True,"invalid","followup_confidence_invalid"),
-    (float('nan'),"invalid","followup_confidence_invalid"),
-    (1.1,"invalid","followup_confidence_invalid"),
+    (None,"missing","conversation_plan_invalid"),
+    ("0.95","invalid","conversation_plan_invalid"),
+    (True,"invalid","conversation_plan_invalid"),
+    (float('nan'),"invalid","conversation_plan_invalid"),
+    (1.1,"invalid","conversation_plan_invalid"),
 ])
-async def test_generated_followup_exposes_why_it_was_not_sent(rig,confidence,state,reason):
+async def test_planned_followup_exposes_why_generation_was_not_started(rig,confidence,state,reason):
     engine,_,provider,clock=rig
     await start(engine)
     clock.advance(6)
@@ -164,14 +204,16 @@ async def test_generated_followup_exposes_why_it_was_not_sent(rig,confidence,sta
         provider.followup_reply["confidence"]=confidence
     result=await engine.handle(event(event_id="confidence-case"))
     assert result["mode"]=="none" and result["reason"]==reason
-    rows=engine.trajectories.list(kind="followup")["items"]
+    assert not calls(provider,'followup') and len(plans(provider,'followup'))==1
+    rows=engine.trajectories.list(kind="group_plan")["items"]
     attach_delivery(engine,rows)
     assert rows[0]["status"]==("success" if state=="valid" else "invalid_output")
-    assert rows[0]["response_text"]=="合成的候选回复"
-    if state!="valid":assert rows[0]["contract_errors"]==["confidence"]
-    assert rows[0]["confidence_state"]==state
-    assert rows[0].get("confidence")==(.79 if state=="valid" else None)
-    assert rows[0]["delivery"]=={"state":"not_sent","status":reason,"mode":"none","reply_id":result["reply_id"]}
+    assert rows[0]['response_text'] is None
+    assert rows[0]['confidence_state']==state
+    assert rows[0].get('confidence')==(.79 if state=='valid' else None)
+    if state!='valid':assert rows[0]['error_code']=='conversation_plan_invalid'
+    else:assert rows[0]['participation_plan']['action']=='observe'
+    assert rows[0]['delivery']['state']=='not_applicable'
 
 
 async def test_threshold_followup_tracks_prepared_then_confirmed_delivery(rig):
@@ -264,7 +306,7 @@ async def test_semantic_noncontinuation_stays_silent_and_ends_window(rig):
     assert IDENTITY not in engine._group_threads
     clock.advance(6)
     assert (await engine.handle(event("继续和小王聊", event_id="after-end")))["mode"] == "none"
-    assert len(calls(provider, "followup")) == 1
+    assert calls(provider,'followup')==[] and len(plans(provider,'followup'))==1
 
 
 @pytest.mark.asyncio
@@ -416,12 +458,13 @@ async def test_followup_keeps_intervening_members_and_can_decline(rig):
     engine.groups.add(SCOPE,'20002','今晚谁来双排？','other-question',display_name='群友乙')
     provider.followup_reply={'continuation':False,'participate':False,'confidence':.1,'text':''}
     result=await engine.handle(event('我来，等我五分钟',event_id='answer-other'))
-    assert result['mode']=='none' and result['reason']=='followup_not_for_bot'
-    messages=calls(provider,'followup')[-1]['messages']
+    assert result['mode']=='none' and result['reason']=='conversation_observed'
+    assert calls(provider,'followup')==[]
+    messages=plans(provider,'followup')[-1]['messages']
     recent=next(json.loads(m['content'].split('\n',1)[1])['recent_conversation'] for m in messages
                 if '"recent_conversation"' in m['content'])
     assert any(r['message_id']=='other-question' for r in recent)
-    assert '不代表这一句仍在对你说' in messages[0]['content']
+    assert '人类转向其他成员后' in messages[0]['content']
     assert IDENTITY not in engine._group_threads
 
 @pytest.mark.asyncio

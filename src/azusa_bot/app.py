@@ -596,11 +596,15 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     @app.get("/admin/groups", dependencies=[Depends(admin)])
     def groups(scope: str):
-        settings=engine.current.settings(scope)
-        return {"scope":scope,"members":engine.groups.familiar_members(scope),
-                "budget":engine.groups.budget_status(scope,**engine._group_budget(settings)),
-                "heat":engine.groups.heat(scope,settings),
-                "stats":engine.groups.get_stats()}
+        current = engine.current
+        settings = current.settings(scope)
+        limits = current._group_budget(settings)
+        budget = current.groups.budget_status(scope, **limits)
+        return {"scope": scope, "members": current.groups.familiar_members(scope),
+                "participation_enabled": settings.group_chat_enabled,
+                "budget": {**budget, "hour_limit": limits["hour_limit"], "day_limit": limits["day_limit"]},
+                "heat": current.groups.heat(scope, settings),
+                "stats": current.groups.get_stats()}
 
     @app.post("/admin/groups/clear", dependencies=[Depends(admin)])
     async def groups_clear(request: Request):
@@ -705,8 +709,11 @@ def create_app(root: Path | None = None) -> FastAPI:
         reply_id=body.get("reply_id")
         if set(body)!={"reply_id"} or not isinstance(reply_id,str) or not re.fullmatch(r"[a-f0-9]{32}",reply_id):
             raise HTTPException(400,"invalid_reply_id")
-        from .segmented_delivery import metadata
-        return {"allowed":not metadata(engine.ledger, reply_id) and engine.authorize_reply(reply_id)}
+        claim_token = engine.claim_reply(reply_id, token_required=request.headers.get("x-xzbot-claim-receipts") == "1")
+        result = {"allowed": claim_token is not None}
+        if claim_token:
+            result["claim_token"] = claim_token
+        return result
 
     @app.post("/bridge/reply/segment-authorize", dependencies=[Depends(bridge)])
     async def segment_authorize(request: Request):
@@ -850,6 +857,30 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(404, "manual_idle_not_found")
         return row
 
+    @app.post("/admin/groups/voice/send", dependencies=[Depends(admin)])
+    async def send_group_voice(request: Request):
+        body = await json_object(request)
+        if (set(body) != {"scope", "request_id", "text"}
+                or not isinstance(body["scope"], str) or len(body["scope"]) > 512
+                or not isinstance(body["request_id"], str) or not re.fullmatch(r"[a-f0-9]{32}", body["request_id"])
+                or not isinstance(body["text"], str) or not body["text"].strip()):
+            raise HTTPException(400, "invalid_voice_request")
+        if qq_connection.snapshot()["state"] not in {"online", "degraded"}:
+            raise HTTPException(409, "manual_voice_offline")
+        try:
+            return engine.idle.queue_manual(body["scope"], body["request_id"], voice_text=body["text"])
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from None
+
+    @app.get("/admin/groups/voice/requests/{number}", dependencies=[Depends(admin)])
+    async def group_voice_status(number: str):
+        if not re.fullmatch(r"[a-f0-9]{32}", number):
+            raise HTTPException(400, "invalid_voice_request")
+        row = engine.idle.manual_status(number, voice=True)
+        if row is None:
+            raise HTTPException(404, "manual_voice_not_found")
+        return row
+
     @app.post("/bridge/idle/manual-claim", dependencies=[Depends(bridge)])
     async def manual_idle_claim(request: Request):
         body = await json_object(request)
@@ -893,15 +924,20 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.post("/bridge/ack", dependencies=[Depends(bridge)])
     async def ack(request: Request):
         body = await json_object(request)
-        if body.get("status") not in {"sent", "uncertain"} or not re.fullmatch(r"[a-f0-9]{32}", str(body.get("reply_id", ""))):
+        if body.get("status") not in {"sent", "uncertain", "cancelled"} or not re.fullmatch(r"[a-f0-9]{32}", str(body.get("reply_id", ""))):
             raise HTTPException(400, "invalid_ack")
         message_id=body.get("message_id")
         if message_id is not None and (not isinstance(message_id,str) or not re.fullmatch(r"-?[0-9]{1,20}",message_id)):
             raise HTTPException(400,"invalid_message_id")
+        claim_token = body.get("claim_token", "")
+        if claim_token != "" and (not isinstance(claim_token, str) or not re.fullmatch(r"[a-f0-9]{32}", claim_token)):
+            raise HTTPException(400, "invalid_claim_token")
         from .segmented_delivery import metadata
         if metadata(engine.ledger, body["reply_id"]):
             raise HTTPException(409, "segment_receipts_required")
-        engine.acknowledge(body["reply_id"],body["status"],message_id)
+        from .delivery_errors import safe_delivery_code
+        error_code = safe_delivery_code(body["error_code"]) if body.get("error_code") else ""
+        engine.acknowledge(body["reply_id"], body["status"], message_id, claim_token=claim_token, error_code=error_code)
         return {"ok":True}
 
     return app

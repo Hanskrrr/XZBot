@@ -5,12 +5,13 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from context_helpers import context as wire_context
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from azusa_bot import lore
 from azusa_bot.core import Engine, Incoming
-from azusa_bot.providers import ProviderError
+from azusa_bot.providers import ProviderError, mock_group_plan
 from azusa_bot.settings import Settings, write_settings
 from azusa_bot.trajectories import references
 from azusa_bot.trajectory_admin import create_router
@@ -21,6 +22,7 @@ SCOPE = "onebot:10001:dm:20001"
 class Provider:
     def __init__(self):
         self.calls = []
+        self.plan_calls = []
         self.error = None
         self.started = None
         self.release = None
@@ -28,6 +30,13 @@ class Provider:
         self.reply_result = None
 
     async def complete(self, messages, *, summary=False):
+        data = wire_context(messages)
+        if not summary and data.get('task') == 'group_plan':
+            self.plan_calls.append(messages)
+            answer = mock_group_plan(data)
+            if self.reply_result and self.reply_result.get('participate') is False:
+                answer['participation_plan']['action'] = 'observe'
+            return answer
         self.calls.append((messages, summary))
         if self.started:
             self.started.set()
@@ -267,17 +276,20 @@ async def test_group_decision_keeps_exact_retrieval_but_not_other_members_transc
     scope = "onebot:10001:group:30001"
     number = engine.memory.add_memory(scope, "20001", "喜欢合成测试猫")
     engine.groups.add(scope, "20002", "其他成员未同意保存的独特群聊正文", "earlier")
-    provider.reply_result = {"participate": False, "confidence": 0, "text": ""}
+    provider.reply_result = {"text": "合成测试猫的话题可以接着聊。", "mode": "text"}
     incoming = event().model_copy(update={"kind": "group", "scope_id": "30001", "unprompted": True})
     result = await engine.handle(incoming)
-    assert result["reason"] == "chose_silence"
+    assert result["mode"] == "text"
     row = engine.trajectories.list()["items"][0]
-    assert row["kind"] == "group_decision" and row["participate"] is False
+    assert row["kind"] == "group_decision" and row["participation_plan"]["action"] == "reply"
     assert row["counts"]["group_context"] == 2
     detail = engine.trajectories.get(row["id"], engine.content_root)
     assert detail["references"]["memories"][0]["id"] == number
     assert "独特群聊正文" not in str(detail)
     assert "独特群聊正文" not in engine.memory._db.execute("SELECT refs FROM trajectories").fetchone()[0]
+    planning = engine.trajectories.list(kind="group_plan")["items"]
+    assert len(planning) == 1 and planning[0]["counts"]["memories"] == 0
+    assert "喜欢合成测试猫" not in str(provider.plan_calls)
 
 
 @pytest.mark.asyncio

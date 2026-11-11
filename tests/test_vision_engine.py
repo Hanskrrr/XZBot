@@ -11,6 +11,7 @@ from context_helpers import context
 
 from azusa_bot.prompts import DEFAULTS
 from azusa_bot.core import Engine, Incoming
+from azusa_bot.providers import mock_group_plan
 from azusa_bot.settings import Settings, private_write, write_settings
 from azusa_bot.vision import VisionCache
 
@@ -25,8 +26,16 @@ def picture():
 
 
 class Provider:
-    def __init__(self):self.calls=[];self.participate=True
+    def __init__(self):self.calls=[];self.plan_calls=[];self.participate=True
     async def complete(self,messages,**kwargs):
+        data=context(messages)
+        if data.get('task')=='group_plan':
+            self.plan_calls.append(messages)
+            answer=mock_group_plan(data)
+            if data['current_message'].get('mentioned'):
+                answer['participation_plan'].update(action='reply',target='self',addressee_ids=[data['self_id']])
+            if not self.participate:answer['participation_plan']['action']='observe'
+            return answer
         self.calls.append(messages)
         if kwargs.get("summary"):return {"memories":[]}
         return {"text":"画面里的红色方块很醒目。" if len(self.calls)==1 else "可以考虑用浅色背景来衬托它。","mode":"text",
@@ -205,7 +214,8 @@ async def test_alias_bypasses_accumulation_but_model_and_rate_limits_still_apply
     assert second["mode"]=="text" and len(provider.calls)==2
     engine._name_decisions.clear();provider.participate=False
     result=await engine.handle(event(event_id="3",text="别人也叫阿梓",mentioned=False,unprompted=True))
-    assert result["reason"]=="chose_silence" and len(provider.calls)==3
+    assert result['reason']=='conversation_observed' and len(provider.calls)==2
+    assert provider.plan_calls
 
 
 @pytest.mark.asyncio

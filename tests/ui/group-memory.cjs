@@ -21,7 +21,8 @@ let lastStep='startup';
    const req=route.request(),url=new URL(req.url()),method=req.method(),body=req.postDataJSON();
    calls.push({path:url.pathname,method,body,profile:req.headers()['x-xzbot-profile']});
    let result={};
-   if(url.pathname==='/'){await route.fulfill({contentType:'text/html',body:html});return;}
+   if(await require('./passive-admin.cjs')(route,["runtime/choice","memory/member-context"]))return;
+ if(url.pathname==='/'){await route.fulfill({contentType:'text/html',body:html});return;}
    if(url.pathname==='/admin/profiles')result={active_id:active,profiles:['default','second'].map(id=>({id,name:id==='default'?'合成角色甲':'合成角色乙',voice:{voice_enabled:false}}))};
    else if(url.pathname.endsWith('/activate')){active=url.pathname.split('/')[3];result={active_id:active};}
    else if(url.pathname==='/admin/status')result={version:'test-only',settings:base,credentials:{},stats:memory().stats};

@@ -1,3 +1,9 @@
+function activityTimingText(timing){
+ if(!timing)return '旧记录尚未保存开关播时间依据。';
+ const span=timing.transition,recency={recent:'变化区间仍在“刚刚”范围内',too_old:'变化已久，不能说“刚刚”',uncertain:'变化区间跨过时间门槛，不能确定“刚刚”',unobserved:'没有观察到可靠的状态变化，不能推断何时开关播'};
+ const observed=Number.isFinite(timing.observed_for_seconds)?'；当前状态在连续轮询中已观察约 '+Math.floor(timing.observed_for_seconds/60)+' 分钟':'';
+ return (span?'状态变化区间：'+readableTime(span.earliest_at)+' — '+readableTime(span.latest_at)+'（非精确时刻）。':'')+(recency[timing.recency]||recency.unobserved)+observed+'。';
+}
 let roleActivityData=null,roleActivityRequest=0;
 function roleChoices(data,kind){
  const map=new Map();for(const row of data.library||[]){if(row.type===kind&&!map.has(row.source_key))map.set(row.source_key,row);}
@@ -12,7 +18,7 @@ function renderRoleActivityPreview(preview){
  box.append(el('p','hint','这是下一次调用的候选快照；实际发出时若预算不足会裁剪，并在调用轨迹记录。近期动态位于背景资料区，当前聊天消息仍在最后。'));
 }
 function renderRoleActivity(data){
- renderRoleActivityPreview(data.context_preview);roleActivityData=data;$('role-activity-enabled').checked=data.config?.enabled===true;const box=$('role-activity-sources');box.replaceChildren();
+ renderRoleActivityPreview(data.context_preview);roleActivityData=data;$('role-activity-enabled').checked=data.config?.enabled===true;$('role-activity-recent-minutes').value=data.config?.recent_transition_minutes??15;const box=$('role-activity-sources');box.replaceChildren();
  for(const [kind,label] of [['bilibili_live','主播直播'],['bilibili_dynamic','主播 B站动态'],['weibo','主播微博']]){
   const div=el('div'),select=el('select');select.id='role-source-'+kind;select.append(new Option('不绑定',''));
   for(const row of roleChoices(data,kind))select.append(new Option((row.name||row.source_key)+(row.local?'':row.as_type?' · 同 UP 的投稿':' · 复用 '+row.account_name),row.source_key));
@@ -26,7 +32,7 @@ function renderRoleActivity(data){
  for(const d of data.filter_diagnostics||[])status.append(el('p',d.recent_count&&!d.matched_count?'status-message error':'hint',(d.name||d.source)+'：近一天抓到 '+d.recent_count+' 条，标题关键词匹配 '+d.matched_count+' 条，过滤 '+d.filtered_count+' 条。'+(d.keywords.length?'标题必须包含：'+d.keywords.join('、')+'（不是作者名）':'未限制标题关键词。')));
 for(const row of data.archive_errors||[])status.append(el('p','status-message error','动态归档失败：'+row.source+'；请检查资料容量。'));
  if(!data.current)status.append(el('p','hint','当前角色未启用动态上下文。'));
- for(const row of data.current?.live||[])status.append(el('p','record-text',(row.name||'绑定的主播')+'：'+({live:'直播中',offline:'未直播',replay:'轮播中',unknown:'状态未知'}[row.status]||'未知')+(row.title?' · '+row.title:'')),el('p','hint','最近检查：'+seenTime(row.checked_at)+(row.error?' · '+row.error:'')));
+ for(const row of data.current?.live||[])status.append(el('p','record-text',(row.name||'绑定的主播')+'：'+({live:'直播中',offline:'未直播',replay:'轮播中',unknown:'状态未知'}[row.status]||'未知')+(row.title?' · '+row.title:'')),el('p','hint','最近检查：'+seenTime(row.checked_at)+(row.error?' · '+row.error:'')),el('p','hint',activityTimingText(row.timing)));
  for(const row of data.available||[]){if(data.config?.sources?.includes(row.key))status.append(el('p','hint',(row.name||row.key)+' · 最近检查：'+(row.last_check?seenTime(row.last_check):'尚未检查')+(row.last_error?' · '+row.last_error:'')));}
 }
 async function loadRoleActivity(){const n=++roleActivityRequest,g=profileGeneration;const data=await api('role-activity');if(n!==roleActivityRequest||g!==profileGeneration)return;renderRoleActivity(data);message('role-activity-state','已载入当前角色的来源与状态。','success');}
@@ -35,7 +41,7 @@ $('role-activity-form').addEventListener('submit',e=>{e.preventDefault();void ac
  if(!roleActivityData?.revision)throw new Error('请先刷新角色动态设置。');const g=profileGeneration,previous=roleActivityData;
  const sources=['bilibili_live','bilibili_dynamic','weibo'].map(k=>$('role-source-'+k).value).filter(Boolean),clip_keywords={};
  for(const check of document.querySelectorAll('[data-role-clip]:checked')){sources.push(check.dataset.roleClip);const field=[...document.querySelectorAll('[data-clip-keywords]')].find(f=>f.dataset.clipKeywords===check.dataset.roleClip);clip_keywords[check.dataset.roleClip]=field.value.split(/[,，\n]/).map(v=>v.trim()).filter(Boolean);}
- const enabled=$('role-activity-enabled').checked;
+ const enabled=$('role-activity-enabled').checked,recent_transition_minutes=Number($('role-activity-recent-minutes').value);if(!Number.isInteger(recent_transition_minutes)||recent_transition_minutes<1||recent_transition_minutes>60)throw new Error('时间范围请填写 1–60 分钟。');
  for(const key of sources){assertCurrentProfile(g);if(!(previous.available||[]).some(r=>r.key===key)){const row=roleChoices(previous,key.split(':')[0]).find(r=>r.source_key===key);if(!row)throw new Error('来源已变化，请刷新重选。');await api('subscriptions/sources',{method:'POST',body:{account_id:row.account_id,source_key:row.origin_source_key||key,...(row.as_type?{as_type:row.as_type}:{})}});}}
- assertCurrentProfile(g);const data=await api('role-activity',{method:'PUT',body:{enabled,sources,clip_keywords,revision:previous.revision}});assertCurrentProfile(g);renderRoleActivity(data);void loadSourceCatalog();message('role-activity-state','已保存；启用的来源会定期检查，无需添加消息推送。','success');
+ assertCurrentProfile(g);const data=await api('role-activity',{method:'PUT',body:{enabled,sources,clip_keywords,recent_transition_minutes,revision:previous.revision}});assertCurrentProfile(g);renderRoleActivity(data);void loadSourceCatalog();message('role-activity-state','已保存；启用的来源会定期检查，无需添加消息推送。','success');
 });});

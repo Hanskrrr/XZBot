@@ -18,6 +18,7 @@ import threading
 import time
 import uuid
 from typing import Any
+from .message_privacy import hidden_message
 
 
 class MemoryStore:
@@ -83,6 +84,10 @@ class MemoryStore:
                     history_id INTEGER NOT NULL, PRIMARY KEY(memory_id, history_id)
                 );
                 CREATE INDEX IF NOT EXISTS source_history ON memory_sources(history_id);
+                CREATE TABLE IF NOT EXISTS memory_facets (
+                    memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+                    facet TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS audit (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL,
                     scope TEXT NOT NULL, actor TEXT NOT NULL,
@@ -100,6 +105,10 @@ class MemoryStore:
                     PRIMARY KEY(scope,user_id)
                 );
             """)
+            from .member_notes import schema as member_notes_schema
+            member_notes_schema(self._db)
+            from .quote_origins import schema as quote_origins_schema
+            quote_origins_schema(self._db)
         self._secure_sidecars()
         version = self._db.execute("SELECT value FROM memory_meta WHERE key='schema_version'").fetchone()[0]
         if version != "1":
@@ -257,6 +266,8 @@ class MemoryStore:
         if role not in ("user", "assistant"):
             raise ValueError("History role must be user or assistant")
         text = self._text(text, maximum=32000)
+        if hidden_message(text):
+            return None
         with self._lock, self._db:
             if not self._consent(scope, user):
                 return None
@@ -273,7 +284,7 @@ class MemoryStore:
         with self._lock, self._db:
             self._prune(scope, user)
             rows = self._db.execute("SELECT * FROM history WHERE scope=? AND user_id=? ORDER BY id DESC LIMIT ?", (scope, user, limit)).fetchall()
-            return [dict(row) for row in reversed(rows)]
+            return [dict(row) for row in reversed(rows) if not hidden_message(row["text"])]
 
     def scope_stats(self, scope):
         self._key(scope)
@@ -315,6 +326,10 @@ class MemoryStore:
     def _memory_record(self, row: sqlite3.Row) -> dict[str, Any]:
         result = dict(row)
         result["source_ids"] = [r[0] for r in self._db.execute("SELECT history_id FROM memory_sources WHERE memory_id=? ORDER BY history_id", (row["id"],)).fetchall()]
+        facet = self._db.execute("SELECT facet FROM memory_facets WHERE memory_id=?", (row["id"],)).fetchone()
+        result["facet"] = facet[0] if facet else "general"
+        from .member_notes import metadata
+        result.update(metadata(self,row["id"]))
         return result
 
     def add_memory(self, scope: str, actor: str, text: str, kind: str = "personal", subject: str | None = None,
@@ -416,6 +431,10 @@ class MemoryStore:
         # the pair as well, otherwise forgotten content can re-enter context.
         row = self._db.execute("SELECT scope,user_id,role,event_id FROM history WHERE id=?", (history_id,)).fetchone()
         if row and row["role"] == "user":
+            self._db.execute("""DELETE FROM memories WHERE source='inferred' AND id IN
+                (SELECT memory_id FROM memory_sources WHERE history_id IN
+                 (SELECT id FROM history WHERE scope=? AND user_id=? AND role='assistant' AND event_id IN (?,?)))""",
+                (row['scope'],row['user_id'],row['event_id'],row['event_id']+':reply'))
             self._db.execute("DELETE FROM history WHERE scope=? AND user_id=? AND role='assistant' AND event_id IN (?,?)",
                              (row["scope"], row["user_id"], row["event_id"], row["event_id"] + ":reply"))
 
@@ -424,11 +443,18 @@ class MemoryStore:
         text = self._text(text)
         with self._lock, self._db:
             self._editable_memory(id, scope, actor, is_owner)
+            from .member_notes import metadata, _text as note_text
+            note=metadata(self,id)
+            if note:
+                text=note_text(text,700 if note['note_type']=='background' else 400)
+                self._db.execute('UPDATE member_context_notes SET version=version+1 WHERE memory_id=?',(id,))
             self.trajectories.erase_previews(scope=scope)
             refs = [r[0] for r in self._db.execute("SELECT history_id FROM memory_sources WHERE memory_id=?", (id,)).fetchall()]
             # Make the target explicit first so invalidating old inferred facts
             # preserves this corrected record and its stable ID.
             self._db.execute("UPDATE memories SET text=?,source='explicit',updated_at=? WHERE id=?", (text, time.time(), id))
+            # A corrected sentence need not have the old extracted meaning.
+            self._db.execute("DELETE FROM memory_facets WHERE memory_id=?", (id,))
             self._erase_sources(refs)
             self._audit("memory_correct", scope, actor, id)
 
@@ -494,7 +520,7 @@ class MemoryStore:
                 return []
             self._prune(scope, user)
             rows = self._db.execute("SELECT * FROM history h WHERE scope=? AND user_id=? AND role='user' AND NOT EXISTS (SELECT 1 FROM memory_sources ms WHERE ms.history_id=h.id) ORDER BY id LIMIT ?", (scope, user, limit)).fetchall()
-            return [dict(r) for r in rows]
+            return [dict(r) for r in rows if not hidden_message(r["text"])]
 
     def _ensure_summary(self, scope: str, user: str) -> None:
         self._db.execute("INSERT OR IGNORE INTO summary_progress(scope,user_id) VALUES (?,?)", (scope, user))
@@ -515,7 +541,8 @@ class MemoryStore:
             self._db.execute("INSERT OR IGNORE INTO summary_progress(scope,user_id,through_id) VALUES (?,?,?)", (scope, user, through))
 
     def begin_summary(self, scope: str, user: str, *, threshold: int = 12,
-                      force: bool = False, limit: int = 100, max_wait_seconds: int | None = None) -> dict[str, Any]:
+                      force: bool = False, limit: int = 100, max_wait_seconds: int | None = None,
+                      revisit: bool = False) -> dict[str, Any]:
         """Claim oldest retained unprocessed statements; never depend on replies.
 
         A claim expires after five minutes so a crashed process cannot leave a
@@ -523,7 +550,7 @@ class MemoryStore:
         consent, existing claims and retry backoff still apply.
         """
         self._key(scope); self._key(user); self._limit(threshold, 100); self._limit(limit, 100)
-        if not isinstance(force, bool):
+        if not isinstance(force, bool) or not isinstance(revisit,bool):
             raise ValueError("force must be boolean")
         if max_wait_seconds is not None:
             self._limit(max_wait_seconds,86400)
@@ -536,22 +563,36 @@ class MemoryStore:
             now = time.time()
             if state["retry_at"] > now:
                 return {"status": "retry_wait", "retry_after_seconds": max(1, math.ceil(state["retry_at"] - now))}
-            rows = self._db.execute("SELECT * FROM history WHERE scope=? AND user_id=? AND role='user' AND id>? ORDER BY id LIMIT ?", (scope, user, state["through_id"], limit)).fetchall()
+            rows = self._db.execute("SELECT * FROM history WHERE scope=? AND user_id=? AND role='user' AND id>? ORDER BY id LIMIT ?", (scope, user, 0 if revisit else state["through_id"], limit)).fetchall()
             if not rows:
+                return {"status": "empty"}
+            # Also respect the marker in history retained from older versions.
+            through = rows[-1]["id"]
+            rows = [row for row in rows if not hidden_message(row["text"])]
+            if not rows:
+                if not revisit:
+                    self._db.execute("UPDATE summary_progress SET through_id=MAX(through_id,?) WHERE scope=? AND user_id=?", (through,scope,user))
                 return {"status": "empty"}
             overdue = max_wait_seconds is not None and now-min(row["created_at"] for row in rows)>=max_wait_seconds
             if not force and len(rows) < threshold and not overdue:
                 return {"status": "below_threshold", "pending": len(rows), "remaining": threshold - len(rows)}
+            generation=state['generation']
+            if revisit:
+                # Revisit only retained, consented history. Keep existing facts;
+                # remaining batches use the usual background queue and budget.
+                generation+=1
+                self._db.execute("UPDATE summary_progress SET through_id=0,generation=? WHERE scope=? AND user_id=?",(generation,scope,user))
+                self._audit('summary_revisit',scope,user)
             claim_id = uuid.uuid4().hex
             self._db.execute("UPDATE summary_progress SET claim_id=?,last_status='running',last_attempt_at=?,retry_at=? WHERE scope=? AND user_id=?", (claim_id, now, now + 300, scope, user))
-            return {"status": "ready", "batch": {"claim_id": claim_id, "generation": state["generation"], "history": [dict(r) for r in rows]}}
+            return {"status": "ready", "batch": {"claim_id": claim_id, "generation": generation, "history": [dict(r) for r in rows]}}
 
     def _summary_current(self, scope: str, user: str, batch: dict) -> bool:
         state = self._db.execute("SELECT generation,claim_id FROM summary_progress WHERE scope=? AND user_id=?", (scope, user)).fetchone()
         return bool(state and state["claim_id"] and state["claim_id"] == batch.get("claim_id")
                     and state["generation"] == batch.get("generation") and self._consent(scope, user))
 
-    def finish_summary(self, scope: str, user: str, batch: dict, items: list[dict]) -> dict[str, Any]:
+    def finish_summary(self, scope: str, user: str, batch: dict, items: list[dict], *, background=None, interactions=None) -> dict[str, Any]:
         """Atomically validate evidence, save valid facts and advance the cursor.
 
         Checking source contents as well as IDs prevents an edit made during a
@@ -570,20 +611,20 @@ class MemoryStore:
             refs = {row["id"]: row for row in evidence}
             for number, source in refs.items():
                 row = self._db.execute("SELECT * FROM history WHERE id=?", (number,)).fetchone()
-                if (not row or row["scope"] != scope or row["user_id"] != user or row["role"] != "user"
-                        or row["text"] != source["text"]):
+                if (not row or row["scope"] != scope or row["user_id"] != user or row["role"] not in {"user","assistant"}
+                        or row["text"] != source["text"] or hidden_message(row["text"])):
                     self._invalidate_summary(scope, user)
                     return {"status": "superseded", "saved": 0}
             saved = 0
             accepted = 0
             saved_ids = []
             now = time.time()
-            for item in items[:3]:
+            for item in items[:6]:
                 if not isinstance(item, dict) or not isinstance(item.get("text"), str) or not item["text"].strip():
                     continue
                 source_ids = item.get("source_ids")
                 if (not isinstance(source_ids, list) or not source_ids or len(source_ids) > 100
-                        or any(not isinstance(x, int) or isinstance(x, bool) or x not in refs for x in source_ids)):
+                        or any(not isinstance(x, int) or isinstance(x, bool) or x not in refs or refs[x]['role']!='user' for x in source_ids)):
                     continue
                 text = item["text"].strip()[:500]
                 accepted += 1
@@ -597,13 +638,23 @@ class MemoryStore:
                     saved_ids.append(memory_id)
                 for source_id in set(source_ids):
                     self._db.execute("INSERT OR IGNORE INTO memory_sources VALUES (?,?)", (memory_id, source_id))
+                facet = item.get("facet", "general")
+                if not isinstance(facet,str) or facet not in {"identity","preference","experience","ongoing","general"}:
+                    facet = "general"
+                self._db.execute("INSERT OR REPLACE INTO memory_facets VALUES (?,?)", (memory_id,facet))
             if items and not accepted:
                 # A malformed non-empty model result is not evidence that the
                 # conversation contained no facts. Keep it pending for retry.
                 raise ValueError("summary_invalid")
+            from .member_notes import apply_summary
+            note_ids=apply_summary(self,scope,user,batch,refs,intro=background,interactions=interactions)
+            saved+=len(note_ids)
+            saved_ids.extend(note_ids)
             status = "saved" if saved else "no_facts"
-            self._db.execute("UPDATE summary_progress SET through_id=MAX(through_id,?),claim_id='',last_status=?,last_success_at=?,last_saved=?,retry_at=0 WHERE scope=? AND user_id=?", (max(refs), status, now, saved, scope, user))
-            result = {"status": status, "saved": saved, "processed": len(evidence)}
+            user_ids=[n for n,r in refs.items() if r['role']=='user']
+            if not user_ids:raise ValueError('summary_invalid')
+            self._db.execute("UPDATE summary_progress SET through_id=MAX(through_id,?),claim_id='',last_status=?,last_success_at=?,last_saved=?,retry_at=0 WHERE scope=? AND user_id=?", (max(user_ids), status, now, saved, scope, user))
+            result = {"status": status, "saved": saved, "processed": len(user_ids)}
             if saved_ids:
                 result["memory_ids"] = saved_ids
             return result

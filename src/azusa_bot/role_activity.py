@@ -88,8 +88,10 @@ def observations(subscriptions):
 
 def save(root,body,observed):
     from . import lore
-    if not isinstance(body,dict) or set(body)-{'enabled','sources','revision','clip_keywords'} or not {'enabled','sources','revision'}<=set(body) or type(body['enabled']) is not bool:
+    if not isinstance(body,dict) or set(body)-{'enabled','sources','revision','clip_keywords','recent_transition_minutes'} or not {'enabled','sources','revision'}<=set(body) or type(body['enabled']) is not bool:
         raise ValueError('role_activity_settings_invalid')
+    minutes=body.get('recent_transition_minutes',config(root).get('recent_transition_minutes',15))
+    if type(minutes) is not int or not 1<=minutes<=60:raise ValueError('role_activity_settings_invalid')
     keys=body['sources']
     if not isinstance(keys,list) or len(keys)>20 or any(not isinstance(k,str) for k in keys) or len(set(keys))!=len(keys):
         raise ValueError('role_activity_sources_invalid')
@@ -105,7 +107,8 @@ def save(root,body,observed):
         old=config(root)
         if revision(old)!=body['revision']:raise ValueError('role_activity_changed_reload')
         since=old.get('since',0) if old['sources']==keys and old['enabled'] else time.time()
-        new={'enabled':body['enabled'],'sources':keys,'since':since,'clip_keywords':filters}
+        new={'enabled':body['enabled'],'sources':keys,'since':since,'clip_keywords':filters,
+             'recent_transition_minutes':minutes}
         lore._atomic(Path(root)/'content/role_activity.json',json.dumps(new,ensure_ascii=False).encode())
     return new
 
@@ -215,6 +218,9 @@ def sync(root,observed,now=None,*,only_sources=None,backfill=False):
             previous=state['sources'].get(r['key'],{})
             saved=state['sources'][r['key']]={k:r[k] for k in ('key','name','type','title','url','last_check','last_error','enabled','live_status','session')}
             saved.update({k:previous[k] for k in ('last_ingest_check','last_live_session','archive_error','config_revision') if k in previous})
+            if r['type']=='bilibili_live':
+                from .context.activity_time import observe
+                saved['timeline']=observe(previous,r,now)
             if not r['enabled'] or r['last_error']:
                 report.update(status='skipped',error=r['last_error'] or 'source_disabled');continue
             if not backfill and r['last_check']==previous.get('last_ingest_check') and previous.get('config_revision')==revision(cfg):continue
@@ -284,9 +290,11 @@ def current(root,now=None):
         status={0:'offline',1:'live',2:'replay'}.get(r.get('live_status'),'unknown') if fresh else 'unknown'
         title=r.get('title','') if fresh else ''
         if GroupConversation.contains_credentials(title):title=''
+        from .context.activity_time import describe as describe_time
         live.append({'source':key,'name':r.get('name',''),'status':status,'title':title,
                      'url':r.get('url',''),'checked_at':r.get('last_check',0),'error':r.get('last_error',''),
-                     'fresh_until':r.get('last_check',0)+300})
+                     'fresh_until':r.get('last_check',0)+300,
+                     'timing':describe_time(r.get('timeline'),status,now,recent_minutes=cfg.get('recent_transition_minutes',15))})
     return {'live':live,'recent_window_hours':24,'recent_post_limit':6,'recent_video_limit':24,'source_role':'公开角色动态同步'}
 
 
@@ -324,5 +332,8 @@ def augment(engine,messages,settings,kwargs):
     data['role_activity']=value;kwargs['refs']['role_activity']=value
     result[1]['content']=prefix+json.dumps(data,ensure_ascii=False)
     result[0]['content']+='\n'+prompt(engine.content_root,'recent_situation',settings)
-    if value is not None:result[0]['content']+='\n'+prompt(engine.content_root,'role_activity',settings)
+    if value is not None:
+        result[0]['content']+='\n'+prompt(engine.content_root,'role_activity',settings)
+        result[0]['content']+='\n'+prompt(engine.content_root,'activity_fact_priority',settings)
+        result[0]['content']+='\n'+prompt(engine.content_root,'activity_time',settings)
     return result

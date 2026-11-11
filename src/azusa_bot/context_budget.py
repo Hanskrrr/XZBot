@@ -17,7 +17,7 @@ from .prompts import DEFAULTS
 DIRECT_PREFIX = DEFAULTS['direct_header']
 GROUP_PREFIX = DEFAULTS['group_header']
 FOLLOWUP_PREFIX = DEFAULTS['followup_header']
-REMOVED_KEYS = ("assets", "history_lookup", "history", "group_context", "dialogue", "memories", "knowledge")
+REMOVED_KEYS = ("assets", "history_lookup", "history", "memories", "knowledge", "member_context", "group_context", "dialogue")
 
 
 def estimate_tokens(messages: list[dict]) -> int:
@@ -52,6 +52,39 @@ def _rows(value):
     if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
         raise ValueError("context_shape_unknown")
     return value
+
+
+def _evidence_ids(row):
+    """IDs backed by retained text, including an explicitly resolved quote."""
+    if not isinstance(row, dict):
+        return set()
+    result = {row['message_id']} if isinstance(row.get('message_id'), str) else set()
+    quote = row.get('quoted_message')
+    if (row.get('quote_status') == 'resolved' and isinstance(quote, dict)
+            and isinstance(quote.get('message_id'), str) and isinstance(quote.get('text'), str)):
+        result.add(quote['message_id'])
+    origin = row.get('quote_origin')
+    if isinstance(origin, dict) and origin.get('status') == 'resolved':
+        sources = origin.get('original_questions')
+        for source in sources if isinstance(sources, list) else []:
+            if isinstance(source, dict) and isinstance(source.get('message_id'), str) and isinstance(source.get('text'), str):
+                result.add(source['message_id'])
+    return result
+
+
+def visible_message_ids(data):
+    """Observed message bodies in this envelope, never relation-only references."""
+    if not isinstance(data, dict):
+        return set()
+    from .request_context import RECENT_KEYS, _timeline
+    current = data.get('current_message', {})
+    retained = _evidence_ids(current)
+    # This is the same merge as the wire serializer: a cached resolved quote
+    # must not survive a live observation that has already withdrawn it.
+    streams = [data.get(key, []) for key in (*RECENT_KEYS, 'recent_conversation')]
+    for row in _timeline(streams, current):
+        retained.update(_evidence_ids(row))
+    return retained
 
 
 def _aligned(rows, refs, keys):
@@ -97,6 +130,7 @@ class _Context:
         self.data = self.followup = None
         self.history = []
         self.summary = None
+        self.plan_sources = set()
         if (not messages or messages[0]["role"] != "system"
                 or any(set(message) != {"role", "content"} for message in messages)):
             raise ValueError("context_shape_unknown")
@@ -106,7 +140,7 @@ class _Context:
             if len(messages) != 2 or messages[1]["role"] != "user":
                 raise ValueError("context_shape_unknown")
             self.summary = _rows(json.loads(messages[1]["content"]))
-            if not self.summary or any(row.get("role") != "user" for row in self.summary):
+            if not self.summary or self.summary[0].get('role')!='user' or any(row.get("role") not in {"user","assistant"} for row in self.summary):
                 raise ValueError("context_shape_unknown")
             _aligned(self.summary, refs["history"], ("id",))
             return
@@ -121,11 +155,11 @@ class _Context:
                     or any(row["role"] not in {"user", "assistant"} for row in self.history)):
                 raise ValueError("context_refs_mismatch")
             self.memory_key = "retrieved_memory"
-        elif kind in {"group_decision", "followup", "group_idle", "group_topic"}:
+        elif kind in {"group_decision", "followup", "group_idle", "group_idle_manual", "group_topic", "group_plan"}:
             if len(messages) != (3 if kind == "followup" else 2):
                 raise ValueError("context_shape_unknown")
             self.data = _json_message(messages, 1, self.group_prefix)
-            if "latest_speaker_id" not in self.data:
+            if kind != 'group_plan' and "latest_speaker_id" not in self.data:
                 raise ValueError("context_shape_unknown")
             self.memory_key = "latest_speaker_own_memories"
             if kind == "followup":
@@ -156,6 +190,21 @@ class _Context:
         if (self.followup is not None and "confirmed_direct_dialogue" in self.data
                 and self.data["confirmed_direct_dialogue"] != dialogue):
             raise ValueError("context_refs_mismatch")
+        if 'participation_plan' in self.data:
+            plan = self.data['participation_plan']
+            sources = plan.get('evidence_message_ids') if isinstance(plan, dict) else None
+            if (not isinstance(sources, list) or len(sources) > 100
+                    or any(not isinstance(source, str) or not source for source in sources)):
+                raise ValueError('participation_plan_invalid')
+            self.plan_sources = set(sources)
+
+    def plan_evidence_available(self):
+        if not self.plan_sources:
+            return True
+        retained = _evidence_ids(self.data.get('current_message', {}))
+        for row in self.data.get('recent_group_messages', []) + self.dialogue():
+            retained.update(_evidence_ids(row))
+        return self.plan_sources <= retained
 
     def dialogue(self):
         if self.followup is not None:
@@ -166,6 +215,13 @@ class _Context:
         if self.summary is not None:
             self.messages[1]["content"] = json.dumps(self.summary, ensure_ascii=False)
             return
+        if self.kind == 'group_plan' and isinstance(self.data.get('local_relation'), dict):
+            relation = self.data['local_relation']
+            allowed = relation.get('permitted_evidence_message_ids')
+            if isinstance(allowed, list):
+                visible = visible_message_ids(self.data)
+                relation['permitted_evidence_message_ids'] = [number for number in allowed
+                    if isinstance(number, str) and number in visible]
         topic=self.data.get("group_topic")
         if topic:
             retained={r.get("message_id") for r in self.data.get("recent_group_messages",[]) if r.get("role")=="user"}
@@ -259,23 +315,30 @@ class _Context:
         if kind == "group_context":
             group = self.data.get("recent_group_messages", [])
             if len(group) > 1:
-                group.pop(0)
-                self.refs["group_context_count"] = len(group)
-                return 1
+                for index, row in enumerate(group[:-1]):
+                    if not self.plan_sources.intersection(_evidence_ids(row)):
+                        group.pop(index)
+                        self.refs["group_context_count"] = len(group)
+                        return 1
         if kind == "dialogue":
             dialogue = self.dialogue()
             count = _turn_prefix_length(dialogue)
-            if count:
+            if count and not any(self.plan_sources.intersection(_evidence_ids(row)) for row in dialogue[:count]):
                 del dialogue[:count]
                 if self.followup is not None and "confirmed_direct_dialogue" in self.data:
                     self.data["confirmed_direct_dialogue"] = deepcopy(dialogue)
                 self.refs["dialogue_count"] = len(dialogue)
                 return count
-        if kind == "memories" and self.data[self.memory_key]:
-            self.data[self.memory_key].pop()
+        if kind in {"memories","member_context"} and self.data[self.memory_key]:
+            fixed={'member_background','recent_interaction','related_member_background','related_member_interaction'}
+            candidates=[i for i,row in enumerate(self.data[self.memory_key])
+                        if (row.get('note_type') in {'background','interaction'} and row.get('selection_reason') in fixed)==(kind=='member_context')]
+            if not candidates:return 0
+            index=candidates[-1]
+            self.data[self.memory_key].pop(index)
             if self.followup is not None:
                 self.followup["member_own_memories"] = deepcopy(self.data[self.memory_key])
-            self.refs["memories"].pop()
+            self.refs["memories"].pop(index)
             return 1
         if kind == "knowledge" and self.data["lore"]:
             # Administrator-pinned whole documents are fixed input, regardless
@@ -321,13 +384,30 @@ def fit_context(messages, refs, *, kind, window_tokens=32768, output_tokens=1200
     before = measure(fitted)
     total_budget = max(0, window_tokens - output_tokens - safety_tokens)
     budget = max(0, total_budget - image_tokens - example_tokens)
-    removed = {key: 0 for key in REMOVED_KEYS}
+    removed = {key: 0 for key in REMOVED_KEYS if key != "member_context"}
     after = before
-    if before > budget:
+    # A plan is not permission to generate from missing evidence, even when a
+    # request already fits. Preserve its sources during every budget/retry pass.
+    try:
+        prefix = fitted_refs.get('prompt_prefixes', {}).get('direct_header' if kind == 'reply' else 'group_header',
+                    DIRECT_PREFIX if kind == 'reply' else GROUP_PREFIX)
+        has_plan = 'participation_plan' in _json_message(fitted, 1, prefix)
+    except (ValueError, KeyError, TypeError, IndexError):
+        has_plan = False
+    context = None
+    evidence_missing = False
+    if before > budget or has_plan or kind == 'group_plan':
         try:
             context = _Context(fitted, fitted_refs, kind)
         except (ValueError, KeyError, TypeError, IndexError):
             context = None
+        evidence_missing = has_plan and (context is None or not context.plan_evidence_available())
+        if kind == 'group_plan' and context is not None:
+            # Even a small request must not advertise IDs represented only by
+            # stale relation metadata. Re-run after every structural reduction.
+            context.render()
+            after = measure(fitted)
+    if after > budget:
         if context is not None:
             if context.summary is not None:
                 removed["history"] = context.trim_summary(budget)
@@ -342,14 +422,14 @@ def fit_context(messages, refs, *, kind, window_tokens=32768, output_tokens=1200
                         count = context.remove(category)
                         if not count:
                             break
-                        removed[category] += count
+                        removed["memories" if category == "member_context" else category] += count
                         if not fixed_over_budget:
                             context.render()
                             after = measure(fitted)
                 if fixed_over_budget and any(removed.values()):
                     context.render()
                     after = measure(fitted)
-    blocked = after > budget or image_tokens + example_tokens > total_budget
+    blocked = after > budget or image_tokens + example_tokens > total_budget or evidence_missing
     metrics = {"window_tokens": window_tokens, "input_budget": budget,
                "output_tokens": output_tokens, "safety_tokens": safety_tokens,
                "image_tokens": image_tokens, "total_input_budget": total_budget,

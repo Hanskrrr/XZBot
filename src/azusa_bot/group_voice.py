@@ -7,6 +7,18 @@ import time
 import uuid
 
 
+def voice_settings_error(settings, text, *, group):
+    if group and settings.group_voice_mode == 'off':
+        return 'group_voice_disabled'
+    if not settings.voice_enabled:
+        return 'voice_disabled'
+    if not settings.voice_authorized:
+        return 'voice_not_authorized'
+    if len(text) > settings.max_voice_chars:
+        return 'voice_text_too_long'
+    return None
+
+
 class GroupVoice:
     def __init__(self, ledger, clock=time.time):
         self.ledger, self.clock = ledger, clock

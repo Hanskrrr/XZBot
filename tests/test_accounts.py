@@ -96,16 +96,19 @@ async def test_two_accounts_same_event_and_group_do_not_share_memory_or_invalida
         release.set(); left.close(); right.close()
 
 
-async def test_managed_bots_cannot_trigger_each_other_or_commands(manager):
+async def test_peer_commands_require_local_identity_configuration(manager):
     _, a = create_child(manager)
     _, b = create_child(manager)
     ready(a, "20001"); ready(b, "20002")
     assert managed_qq_ids(a) == {"10001", "20001", "20002"}
     engine = ProfileEngineManager(a)
     try:
+        unconfigured = await engine.handle(incoming("20001", "20002", "unconfigured").model_copy(update={"text": "/身份"}))
+        assert unconfigured["mode"] == "text" and unconfigured.get("reason") not in {"managed_bot_sender", "peer_bot_sender"}
+        write_settings(a, read_settings(a).model_copy(update={"onebot_peer_bot_ids": ["10001", "20002"]}))
         for sender in ("10001", "20002"):
-            result = await engine.handle(incoming("20001", sender).model_copy(update={"text": "/记住 不应保存"}))
-            assert result["reason"] == "managed_bot_sender"
+            result = await engine.handle(incoming("20001", sender, "configured-" + sender).model_copy(update={"text": "/记住 不应保存"}))
+            assert result["reason"] == "peer_bot_sender"
         assert engine.memory.stats()["memories"] == 0
         assert engine.trajectories.list()["items"] == []
     finally:
@@ -154,6 +157,28 @@ def test_cross_account_tokens_origins_and_duplicate_qq_binding_rejected(manager)
             assert cb.get("/admin/status", headers=auth_b).json()["account_context"]["id"] == b.name
     finally:
         for app in apps: app.state.engine.close()
+
+
+def test_exact_trajectory_search_is_local_to_each_account(manager):
+    _, left = create_child(manager, '甲')
+    _, right = create_child(manager, '乙')
+    for root, qq, other in ((left, '20001', '20002'), (right, '20002', '20001')):
+        ready(root, qq)
+        app = create_app(root)
+        admin = {'Authorization':'Bearer ' + (root / 'data/admin.token').read_text().strip()}
+        path = '/admin/trajectories'
+        scope, other_scope = f'onebot:{qq}:group:30001', f'onebot:{other}:group:30001'
+        try:
+            with TestClient(app) as client:
+                response = asyncio.run(app.state.engine.handle(incoming(qq, event_id='-4242')))
+                assert response['mode'] == 'text'
+                message, = client.get(path + '/events', headers=admin, params={'message_id':'-4242'}).json()['items']
+                assert message['reply_id'] == response['reply_id'] and message['scope'] == scope
+                call, = client.get(path, headers=admin, params={'call_id':1}).json()['items']
+                assert call['id'] == 1 and call['scope'] == scope
+                assert client.get(path, headers=admin, params={'call_id':1, 'scope':other_scope}).json()['items'] == []
+        finally:
+            app.state.engine.close()
 
 
 async def test_operations_reject_duplicates_and_never_touch_other_root(manager, monkeypatch):

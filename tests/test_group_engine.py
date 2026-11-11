@@ -13,7 +13,7 @@ from context_helpers import context as wire_context
 from support_content import seed_content
 
 from azusa_bot.core import Engine, Incoming
-from azusa_bot.providers import ProviderError
+from azusa_bot.providers import ProviderError, mock_group_plan
 from azusa_bot.settings import Settings, write_settings
 
 
@@ -38,6 +38,9 @@ class Clock:
 class Provider:
     def __init__(self):
         self.calls = []
+        self.plan_calls = []
+        self.all_calls = []
+        self.plan_answer = None
         self.answer = {"participate": True, "confidence": .95, "text": "今晚可以一起组队玩游戏。", "mode": "text"}
         self.error = None
         self.entered = None
@@ -45,7 +48,24 @@ class Provider:
         self.summary_answer = {"memories": []}
 
     async def complete(self, messages, *, summary=False):
-        self.calls.append({"messages": messages, "summary": summary})
+        call = {"messages": messages, "summary": summary}
+        self.all_calls.append(call)
+        data = wire_context(messages)
+        if not summary and data.get('task') == 'group_plan':
+            self.plan_calls.append(call)
+            if self.plan_answer is not None:
+                return self.plan_answer(data) if callable(self.plan_answer) else self.plan_answer
+            answer = mock_group_plan(data)
+            # Existing tests script participation through this fake's answer.
+            # Keep that decision in its planning stage, separate from speech.
+            if isinstance(self.answer,dict):
+                for key in ('confidence','votes'):
+                    if key in self.answer:
+                        answer[key] = self.answer[key]
+            if not isinstance(self.answer,dict) or self.answer.get('participate') is False:
+                answer['participation_plan']['action'] = 'observe'
+            return answer
+        self.calls.append(call)
         if summary:
             return self.summary_answer(messages) if callable(self.summary_answer) else self.summary_answer
         if self.entered:
@@ -318,6 +338,8 @@ async def test_long_term_summary_uses_only_consented_current_members_sources(rig
     for n in range(4):
         await engine.handle(event(f"我自己的游戏偏好{n}", event_id=f"own-{n}"))
     await engine.handle(event("未同意成员的公开聊天", user_id="20003", event_id="no-consent"))
+    assert not any(call['summary'] for call in provider.calls)
+    await engine.summarize_due()
     memories = engine.memory.list_memories(SCOPE, "20001")
     assert [(row["text"], row["source"]) for row in memories] == [("用户自述喜欢游戏", "inferred")]
     assert engine.memory.recent_history(SCOPE, "20003") == []
@@ -341,12 +363,14 @@ async def test_other_group_activity_cannot_satisfy_this_groups_message_threshold
 
 
 @pytest.mark.asyncio
-async def test_newer_group_message_during_generation_discards_obsolete_reply(rig):
+async def test_newer_human_redirect_during_generation_discards_obsolete_reply(rig):
     engine, _, provider, _ = rig
     provider.entered, provider.release = asyncio.Event(), asyncio.Event()
-    waiting = asyncio.create_task(engine.handle(event("先前的话题")))
+    waiting = asyncio.create_task(engine.handle(event("请回答先前的问题。", mentioned_user_ids=["10001"])))
     await asyncio.wait_for(provider.entered.wait(), 2)
-    engine.groups.add(SCOPE, "20002", "现在换了一个话题", "newer-observation")
+    changed = await engine.handle(event("小林，现在换我问你。", event_id="newer-observation",
+        mentioned_user_ids=["20002"], mentioned_members=[{"user_id":"20002","display_name":"小林"}]))
+    assert changed['mode'] == 'none'
     provider.release.set()
     result = await waiting
     assert result["mode"] == "none" and result["text"] == ""

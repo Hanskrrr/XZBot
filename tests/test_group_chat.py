@@ -202,3 +202,101 @@ def test_context_and_budget_capacity_do_not_reset_existing_reservations(tmp_path
     assert state.snapshot("g1") == []
     assert state.budget_status("g2",**budget)["reason"] == "scope_capacity"
     assert state.budget_status("g1",**budget)["day_used"] == 1
+
+
+def test_peer_context_has_trusted_identity_without_human_heat_or_familiarity(group):
+    from azusa_bot.settings import Settings
+
+    state, clock = group
+    settings = Settings(group_heat_enabled=True, group_heat_min_messages=4, group_heat_min_members=2)
+    state.silence_seconds("g1")
+    state.add("g1", "human", "真人提出话题", "human-1")
+    clock.advance(20)
+    for index in range(5):
+        state.add("g1", "peer", f"另一个 bot 的补充 {index}", f"peer-{index}", is_bot=True)
+    rows = state.snapshot("g1")
+    assert rows[0]["role"] == "user" and "is_bot" not in rows[0]
+    assert all(row["role"] == "user" and row["is_bot"] is True for row in rows[1:])
+    assert state.familiarity("g1", "peer") is None
+    assert state.familiarity("g1", "human")["message_count"] == 1
+    heat = state.heat("g1", settings)
+    assert (heat["messages"], heat["members"], heat["hot"]) == (1, 1, False)
+    assert state.silence_seconds("g1") == 20
+    # Hearing a peer must not make this account's own send cooldown start now.
+    assert state.budget_status("g1")["allowed"]
+
+
+def test_peer_budget_resets_only_for_new_accepted_human_input(group):
+    state, _ = group
+    initial = state.peer_budget("g1")
+    assert initial == {"epoch":"", "used":0, "limit":1, "allowed":True}
+    assert state.reserve_peer_reply("g1", initial["epoch"])
+    assert not state.reserve_peer_reply("g1", initial["epoch"])
+    state.add("g1", "peer", "另一 bot 继续发言", "peer-1", is_bot=True)
+    state.add("g1", "self", "自己已确认发出的回复", "sent-1", role="assistant")
+    assert state.peer_budget("g1")["used"] == 1
+    assert state.peer_epoch_current("g1", initial["epoch"])
+    assert state.add("g1", "human", "真人带来新的话题", "human-1")
+    refreshed = state.peer_budget("g1")
+    assert refreshed["epoch"] and refreshed["epoch"] != initial["epoch"]
+    assert refreshed["used"] == 0 and refreshed["allowed"]
+    assert not state.peer_epoch_current("g1", initial["epoch"])
+    assert not state.reserve_peer_reply("g1", initial["epoch"])
+    assert state.reserve_peer_reply("g1", refreshed["epoch"])
+    assert state.add("g1", "human", "真人带来新的话题", "human-1") is None
+    assert state.peer_budget("g1")["used"] == 1
+    assert state.peer_budget("g2")["used"] == 0
+
+
+def test_excluded_humans_and_context_expiry_cannot_rearm_peer_budget(group):
+    state, clock = group
+    state.add("g1", "human", "开始这一轮对话", "human-1")
+    epoch = state.peer_budget("g1")["epoch"]
+    assert state.reserve_peer_reply("g1", epoch)
+    state.set_optout("g1", "excluded")
+    assert state.add("g1", "excluded", "这条不应采集", "excluded-1") is None
+    assert state.add("g1", "human", "/管理指令", "command-1") is None
+    assert state.add("g1", "human", "password=synthetic-test-secret", "secret-1") is None
+    state.clear_scope("g1")
+    state.clear_all()
+    clock.advance(86401)
+    assert state.snapshot("g1") == []
+    assert state.peer_budget("g1") == {"epoch":epoch,"used":1,"limit":1,"allowed":False}
+    restarted = GroupConversation(state.path, clock=clock)
+    try:
+        assert restarted.peer_budget("g1")["used"] == 1
+        assert not restarted.reserve_peer_reply("g1", epoch)
+    finally:
+        restarted.close()
+
+
+def test_peer_reservations_are_atomic_across_instances(group):
+    state, clock = group
+    other = GroupConversation(state.path, clock=clock)
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            reserved = list(pool.map(lambda index: (state if index % 2 else other).reserve_peer_reply("g1", ""), range(20)))
+        assert sum(reserved) == 1
+        assert state.peer_budget("g1")["used"] == other.peer_budget("g1")["used"] == 1
+    finally:
+        other.close()
+
+
+def test_peer_shortcut_capacity_does_not_invalidate_ordinary_peer_epoch(tmp_path):
+    state = GroupConversation(tmp_path / "state.sqlite3", max_scopes=1)
+    try:
+        for index in range(4):
+            assert state.reserve_peer_reply(f"g{index}", "")
+        assert not state.peer_budget("new")["allowed"]
+        assert not state.reserve_peer_reply("new", "")
+        assert state.peer_epoch_current("new", "")
+        state.add("new", "human", "仍然可以旁听的真人消息", "new-1")
+        assert not state.peer_budget("new")["allowed"]
+        # Existing scopes remain usable, including a genuine human reset.
+        assert not state.reserve_peer_reply("g0", "")
+        state.add("g0", "human", "真人再次发言", "human-1")
+        refreshed = state.peer_budget("g0")
+        assert refreshed["allowed"] and refreshed["used"] == 0
+        assert state.peer_budget("g1")["used"] == 1
+    finally:
+        state.close()

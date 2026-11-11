@@ -97,8 +97,9 @@ async def test_group_silence_identifies_actual_trigger_not_whole_context(rig):
     incoming=event().model_copy(update={"kind":"group","scope_id":"30001","text":"这次该不该聊？","unprompted":True})
     await engine.handle(incoming)
     row=engine.trajectories.list()["items"][0]
-    assert row["request_tail"] == incoming.text and row["response_text"] == ""
-    assert row["participate"] is False
+    assert row["request_tail"] == incoming.text and row["response_text"] is None
+    assert row['kind']=='group_plan' and row['participation_plan']['action']=='observe'
+    assert not provider.calls and len(provider.plan_calls)==1
     assert "NEIGHBOR_TRANSCRIPT_NOT_COPIED" not in str(engine.trajectories.get(row["id"],engine.content_root))
 
 
@@ -139,7 +140,8 @@ async def test_declined_group_contributor_suppresses_derived_text_and_linked_spe
     await engine.handle(incoming)
     row=engine.trajectories.list()["items"][0]
     assert row["preview_redacted"] and row["request_tail"] is None and row["response_text"] is None
-    assert row["provider_called"] and "这段只参与短期聊天" in str(provider.calls)
+    assert row["provider_called"] and "这段只参与短期聊天" in str(provider.plan_calls)
+    assert not provider.calls
     child=engine.trajectories.begin("tts","group_observation",scope,"20001","fish","fixture",references(),
         related_id=row["id"],request_text="回答可能重复被拒绝保存的话",request_kind="speech")
     engine.trajectories.called(child)
@@ -258,4 +260,35 @@ def test_old_database_additive_migration_keeps_unknown_preview(tmp_path):
         row=memory.trajectories.list()["items"][0]
         assert row["id"] == n and row["request_tail"] is None and row["response_text"] is None
         assert not row["preview_redacted"]
+        assert row['response_preview_state']=='not_called' and row['input_messages'] is None
     finally:memory.close()
+
+
+def test_input_metadata_and_plan_identifiers_are_sanitized_and_erased(rig):
+    engine,_,_=rig
+    store=engine.trajectories
+    origin={'status':'resolved','original_questions':[{'message_id':'21','user_id':'20003'}]}
+    refs=dict(references(),delivery_event_key='a'*64,message_event_key='b'*64,quote_origin=origin)
+    number=store.begin('group_plan','group_observation',SCOPE,'20001','mock','mock',refs)
+    store.called(number,input_messages={'version':1,'total':2,'items':[
+        {'source':'recent_conversation','message_id':'not-public','text':'private body','user_id':'20002'},
+        {'source':'current_message','message_id':'12','role':'user'}]})
+    assert store.set_context(number, dict(references(),quote_origin=origin))
+    store.finish(number,result={'participation_plan':{'action':'observe','target':'group','evidence_message_ids':['12']}})
+    detail=store.get(number,engine.content_root)
+    assert detail['response_preview_state']=='planning_only'
+    assert detail['input_messages']['items'][0]['message_id'].startswith('sha256:')
+    assert detail['input_messages']['items'][1]['message_id']=='12'
+    assert detail['participation_plan']['evidence_message_ids']==['12']
+    assert detail['quote_origin']['original_questions'][0]['message_id']=='21'
+    stored=engine.memory._db.execute('SELECT refs FROM trajectories WHERE id=?',(number,)).fetchone()[0]
+    assert json.loads(stored)['message_event_key']=='b'*64
+    assert all(raw not in stored for raw in ('private body','not-public','20002'))
+    store.erase_previews(scope=SCOPE)
+    detail=store.get(number,engine.content_root)
+    assert detail['input_messages'] is None and detail['participation_plan'] is None and detail['quote_origin'] is None
+    assert detail['response_preview_state']=='redacted' and detail['delivery_event_key']=='a'*64
+    stored=engine.memory._db.execute('SELECT refs,result FROM trajectories WHERE id=?',(number,)).fetchone()
+    assert not {'input_messages','quote_origin'} & json.loads(stored[0]).keys()
+    assert json.loads(stored[0])['message_event_key']=='b'*64
+    assert 'participation_plan' not in json.loads(stored[1])

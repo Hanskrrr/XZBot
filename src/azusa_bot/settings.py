@@ -38,6 +38,7 @@ class Settings(BaseModel):
     onebot_self_id: str = Field(default="", max_length=20, pattern=r"^(?:[1-9][0-9]{0,19})?$")
     onebot_allowed_groups: list[QQNumber] = []
     onebot_allowed_dm_users: list[QQNumber] = []
+    onebot_peer_bot_ids: list[QQNumber] = Field(default_factory=list, max_length=100)
     onebot_owners: list[Owner] = []
     read_existing_dsh: bool = False
     provider_mode: Literal["mock", "cloud"] = "mock"
@@ -60,6 +61,7 @@ class Settings(BaseModel):
     context_window_tokens: int = Field(default=32768, ge=4096, le=1000000, strict=True)
     vision_enabled: bool = Field(default=True, strict=True)
     group_chat_enabled: bool = False
+    group_chat_peer_echo_enabled: bool = Field(default=False, strict=True)
     group_chat_confidence_threshold: float = Field(default=0.8, ge=0, le=1, strict=True)
     group_vote_enabled: bool = False
     group_vote_weight_relevance: int = Field(default=25, ge=0, le=100, strict=True)
@@ -133,6 +135,19 @@ class Settings(BaseModel):
             if owner.kind == "dm" and owner.scope_id != owner.user_id:
                 raise ValueError("OneBot private owner scope must equal its QQ user ID")
         return owners
+
+    @field_validator("onebot_peer_bot_ids")
+    @classmethod
+    def validate_peer_bot_ids(cls, identities: list[str]) -> list[str]:
+        if len(set(identities)) != len(identities):
+            raise ValueError("onebot_peer_bot_ids_duplicate")
+        return identities
+
+    @model_validator(mode="after")
+    def validate_peer_bot_identity(self):
+        if self.onebot_self_id in self.onebot_peer_bot_ids:
+            raise ValueError("onebot_peer_bot_ids_contains_self")
+        return self
 
     @model_validator(mode="after")
     def validate_vote_weights(self):

@@ -6,7 +6,7 @@ Only scoped local knowledge/history and configured public search are executable 
 """
 from dataclasses import dataclass, field
 import asyncio
-from . import conversation_config, knowledge_lookup, history_lookup, web_search
+from . import conversation_config, knowledge_lookup, history_lookup, web_search, activity_guard
 from .prompts import prompt
 from .providers import ProviderError
 
@@ -40,9 +40,11 @@ async def run_dialogue(engine, provider, messages, settings, kwargs):
 
 
 async def _run_dialogue(engine, provider, messages, settings, kwargs):
-    budget = ExecutionBudget(**conversation_config.read(engine.content_root)["execution"])
+    kwargs = dict(kwargs)
+    budget = kwargs.pop('execution_budget',None) or ExecutionBudget(**conversation_config.read(engine.content_root)["execution"])
     kwargs = dict(kwargs, context_generation=kwargs.get("context_generation", engine.generation(kwargs["scope"])))
     evidence = None
+    activity_retries=0
     while True:
         can_tool = len(budget.tools) < budget.max_tool_rounds and budget.model_calls + 1 < budget.max_model_calls
         search_allowed = can_tool and settings.web_search_enabled and "web_search" not in budget.tools
@@ -52,18 +54,27 @@ async def _run_dialogue(engine, provider, messages, settings, kwargs):
             messages[0]["content"] += "\n" + prompt(engine.content_root, "execution_done", settings)
         answer = await engine._complete_traced_once(provider, messages, settings,
             allow_search=search_allowed, allow_knowledge=knowledge_allowed, allow_history=history_allowed, execution=budget, **kwargs)
-        query = knowledge_lookup.query(answer, kwargs["kind"], settings) if knowledge_allowed else None
-        history_term=history_lookup.query(answer,kwargs['kind'],settings) if history_allowed else None
+        query_kind = "reply" if engine._group_target_context.get() is not None else kwargs["kind"]
+        query = knowledge_lookup.query(answer, query_kind, settings) if knowledge_allowed else None
+        history_term=history_lookup.query(answer,query_kind,settings) if history_allowed else None
         if history_term:
             budget.tools.append('history_lookup')
             messages,parent=history_lookup.prepare(engine,messages,settings,kwargs,history_term)
         elif query:
             budget.tools.append("knowledge_lookup")
             messages, parent = knowledge_lookup.prepare(engine, messages, settings, kwargs, query)
-        elif search_allowed and engine._wants_search(answer, kwargs["kind"], settings):
+        elif search_allowed and engine._wants_search(answer, query_kind, settings):
             budget.tools.append("web_search")
             messages, evidence, parent = await engine._search_evidence(answer, messages, settings, kwargs)
         else:
+            check=activity_guard.assess(engine,answer,settings,kwargs,retry=activity_retries)
+            if check and check['status']=='conflict':
+                if activity_retries or budget.model_calls>=budget.max_model_calls:
+                    raise ProviderError('activity_state_conflict')
+                activity_retries+=1
+                messages=activity_guard.repair(engine,messages,settings,kwargs,check)
+                kwargs.update(trace_id=None,related_id=kwargs['refs']['_trace_id'])
+                continue
             if evidence:
                 answer["_web_evidence"] = evidence
                 displayed = web_search.cite(answer, evidence, show=settings.web_search_show_sources or

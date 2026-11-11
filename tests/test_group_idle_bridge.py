@@ -92,15 +92,17 @@ def test_manual_send_works_with_automatic_participation_disabled(monkeypatch):
     assert calls[-1][1]['status']=='sent'
 
 
-@pytest.mark.parametrize('manual',[False,True])
-def test_idle_voice_uses_real_base64_parser_and_never_duplicates_text(monkeypatch,tmp_path,manual):
+@pytest.mark.parametrize(('manual','voice_only','mode'),[
+    (False,False,'voice'),(True,False,'voice'),(True,True,'voice'),(True,True,'text')])
+def test_idle_voice_uses_real_base64_parser_and_never_duplicates_text(monkeypatch,tmp_path,manual,voice_only,mode):
     import wave,base64
     wav=tmp_path/'voice.wav'
     with wave.open(str(wav),'wb') as f:
         f.setnchannels(1);f.setsampwidth(2);f.setframerate(24000);f.writeframes(b'\0\0'*240)
     monkeypatch.setenv('AZUSA_MEDIA_ROOT',str(tmp_path))
     bridge,bot,calls=fixture(monkeypatch)
-    voice=dict(ITEM,mode='voice',media_path=str(wav),manual=manual)
+    voice=dict(ITEM,mode=mode,media_path=str(wav),manual=manual)
+    if voice_only:voice['voice_only']=True
     async def handler(request):
         body=json.loads(request.content);calls.append((request.url.path,body))
         if request.url.path.endswith('claim'):return httpx.Response(200,json={'messages':[voice]})
@@ -111,6 +113,11 @@ def test_idle_voice_uses_real_base64_parser_and_never_duplicates_text(monkeypatc
         try:await bridge._idle_tick(manual=manual)
         finally:await bridge.terminate()
     asyncio.run(go())
+    if mode=='text':
+        assert not bot.calls
+        assert not any(path.endswith('/authorize') for path,_ in calls)
+        assert calls[-1][1]['status']=='failed'
+        return
     assert len(bot.calls)==1
     message=bot.calls[0][1]['message'];assert len(message)==1 and message[0]['type']=='record'
     assert base64.b64decode(message[0]['data']['file'][9:])==wav.read_bytes()

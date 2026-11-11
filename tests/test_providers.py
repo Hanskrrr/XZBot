@@ -66,7 +66,7 @@ async def test_deepseek_auth_model_and_json_success_do_not_expose_credentials(cl
         body = json.loads(request.content)
         assert body["model"] == "test-deepseek-model"
         assert body["response_format"] == {"type": "json_object"}
-        assert body["stream"] is False and body["max_tokens"] == 700
+        assert body["stream"] is False and body["max_tokens"] == 3200
         return httpx.Response(200, json=completion({"memories": []}))
 
     requests, options = transport(handler)
@@ -75,6 +75,40 @@ async def test_deepseek_auth_model_and_json_success_do_not_expose_credentials(cl
     assert len(requests) == 1 and options[0]["follow_redirects"] is False
     assert SECRET not in repr(result) and SECRET not in caplog.text
     assert SECRET not in repr(cloud.credentials)
+
+
+@pytest.mark.parametrize("content", [
+    '\ufeff{"text":"你好"}',
+    '\ufeff \n```JSON\r\n{"text":"你好"}\r\n```\n',
+    '```\n{"text":"你好"}\n```',
+])
+async def test_deepseek_accepts_complete_json_with_a_bom_or_single_fence(cloud, transport, content):
+    response = completion({})
+    response["choices"][0]["message"]["content"] = content
+    response["usage"] = {"completion_tokens": 12}
+    requests, _ = transport(lambda request: httpx.Response(200, json=response))
+
+    answer = await cloud.complete(MESSAGES)
+
+    assert answer == {"text": "你好"}
+    assert answer.usage == {"completion_tokens": 12}
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize(("content", "finish", "code"), [
+    ('说明\n```json\n{"text":"你好"}\n```', "stop", "deepseek_output_not_json"),
+    ('```json\n{"text":"你好"}\n```\n{}', "stop", "deepseek_output_not_json"),
+    ('```json\n{"text":"你好"\n```', "stop", "deepseek_output_not_json"),
+    ('```json\n{"text":"你好"}\n```', "length", "generation_length_limit"),
+])
+async def test_deepseek_rejects_ambiguous_or_truncated_fenced_output(cloud, transport, content, finish, code):
+    response = completion({}, finish=finish)
+    response["choices"][0]["message"]["content"] = content
+    transport(lambda request: httpx.Response(200, json=response))
+
+    with pytest.raises(ProviderError) as error:
+        await cloud.complete(MESSAGES)
+    assert str(error.value) == code
 
 
 @pytest.mark.asyncio

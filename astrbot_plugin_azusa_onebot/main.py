@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 import httpx
 from azusa_bot.bot_control import activity_allowed
+from azusa_bot.message_privacy import hidden_message, hidden_segments
 from azusa_bot.delivery_errors import classify_send_error
 from aiocqhttp import Event
 
@@ -181,11 +182,14 @@ class AzusaOneBot(Star):
                     continue
                 if not isinstance(text,str) or not text.strip() or len(text)>600:
                     raise ValueError('Invalid idle text')
-                if item.get('mode','text') not in {'text','voice'}:
+                voice_only = item.get('voice_only') is True
+                mode = item.get('mode','text')
+                if mode not in {'text','voice'} or (voice_only and (not manual or mode != 'voice')):
                     raise ValueError('Invalid idle output mode')
-                chain = self._message(dict(item,mode=item.get('mode','text')))
+                chain = self._message(dict(item,mode=mode))
                 outgoing = await AiocqhttpMessageEvent._parse_onebot_json(chain)
-                if len(outgoing)!=1 or outgoing[0].get('type') not in {'text','record'}:
+                allowed_types = {'record'} if voice_only else {'text','record'}
+                if len(outgoing)!=1 or outgoing[0].get('type') not in allowed_types:
                     raise ValueError('Exactly one idle output required')
                 authorization = await self.client.post(base+'/bridge/idle/authorize',headers=headers,
                     json={**{key:ack[key] for key in ('id','claim_token','self_id')}},timeout=10)
@@ -419,7 +423,7 @@ class AzusaOneBot(Star):
     def _text(segments, self_id):
         if not isinstance(segments, list) or len(segments) > 200:
             raise ValueError("OneBot array message required")
-        parts, mentioned, reply_to_id, has_text = [], False, None, False
+        parts, mentioned, reply_to_id, has_text, meaningful_mention = [], False, None, False, False
         for segment in segments:
             if not isinstance(segment, dict) or not isinstance(segment.get("data"), dict):
                 raise ValueError("Malformed message segment")
@@ -438,6 +442,7 @@ class AzusaOneBot(Star):
                     mentioned = True
                 else:
                     parts.append(" @" + numeric_id(target) + " ")
+                    meaningful_mention = True
             elif kind == "reply":
                 reference = message_id(data.get("id"))
                 if reply_to_id is not None and reference != reply_to_id:
@@ -445,7 +450,9 @@ class AzusaOneBot(Star):
                 reply_to_id = reference
             # Image bytes travel separately; media/face/forward segments never
             # invent text from placeholders, URLs or quoted message bodies.
-        text = "".join(parts).strip() if has_text else ""
+        # A native reply containing only @another member can answer "who?".
+        # Standalone @ activity and @all still do not invent spoken content.
+        text = "".join(parts).strip() if has_text or (reply_to_id and meaningful_mention) else ""
         if len(text) > 10000:
             raise ValueError("Message too long")
         return text, mentioned, reply_to_id
@@ -485,6 +492,10 @@ class AzusaOneBot(Star):
         if not self._scope_allowed(policy, kind, scope_id):
             return None
         text, mentioned, reply_to_id = self._text(raw.get("message"), self_id)
+        # Native @/reply/image segments do not change where the typed text starts.
+        # Check before quote fetches, image handling or forwarding to the core.
+        if hidden_segments(raw["message"]):
+            return None
         # Only native image segments can supply visual inputs. No file path,
         # quoted body, literal CQ string or ordinary text URL becomes an image.
         # The core validates QQ CDN hosts and downloads after its own gates.
@@ -499,12 +510,20 @@ class AzusaOneBot(Star):
                     break
         # Scan the already validated SDK segments separately. Literal @/CQ text
         # never proves that a continuation was addressed to another participant.
-        other_mentioned = any(
-            segment.get("type") == "at" and (
-                segment["data"].get("qq") == "all"
-                or numeric_id(segment["data"].get("qq")) != self_id
-            ) for segment in raw["message"]
-        )
+        mentioned_user_ids, mentions_everyone = [], False
+        for segment in raw["message"]:
+            if segment.get("type") != "at":
+                continue
+            target = segment["data"].get("qq")
+            if target == "all":
+                mentions_everyone = True
+            else:
+                target = numeric_id(target)
+                if target not in mentioned_user_ids:
+                    mentioned_user_ids.append(target)
+                    if len(mentioned_user_ids) > 20:
+                        raise ValueError("Too many native mentions")
+        other_mentioned = mentions_everyone or any(target != self_id for target in mentioned_user_ids)
         command = text.split(maxsplit=1)[0] if text else ""
         # Forward eligible white-listed text/images to the local core even while
         # proactive participation is off. The core independently applies the
@@ -516,11 +535,47 @@ class AzusaOneBot(Star):
                 "scope_id": scope_id, "user_id": user_id,
                 "event_id": message_id(raw.get("message_id")), "text": text,
                 "images": images,
-                **({"activity_only": True} if not text and not images else {}),
+                # A native @self is a direct call even without typed words.
+                # Keep text empty; other mentions/media remain activity-only.
+                **({"activity_only": True} if not text and not images and not mentioned else {}),
                 "mentioned": mentioned, "other_mentioned": other_mentioned,
+                "mentioned_user_ids": mentioned_user_ids, "mentions_everyone": mentions_everyone,
                 "display_name": self._display_name(sender),
                 "reply_to_id": reply_to_id,
                 "unprompted": kind == "group" and not mentioned and command not in COMMANDS}
+
+    async def _mentioned_members(self, event, payload):
+        """Resolve only native @ targets in this group, never fetch its roster."""
+        targets = payload.get("mentioned_user_ids", [])
+        if payload["kind"] != "group" or not targets:
+            return []
+        semaphore = asyncio.Semaphore(4)
+
+        async def lookup(target):
+            try:
+                async with semaphore:
+                    row = await event.bot.get_group_member_info(group_id=int(payload["scope_id"]),
+                        user_id=int(target), no_cache=False, self_id=int(payload["app_id"]))
+                if not isinstance(row,dict) or numeric_id(row.get("user_id")) != target:
+                    return None
+                if "group_id" in row and numeric_id(row["group_id"]) != payload["scope_id"]:
+                    return None
+                name = self._display_name(row)
+                return {"user_id":target, "display_name":name} if name else None
+            except Exception:
+                # A stale/missing member record cannot change native identity.
+                return None
+
+        tasks = [asyncio.create_task(lookup(target)) for target in targets[:20]]
+        try:
+            done, _ = await asyncio.wait(tasks,timeout=3)
+            return [row for task in tasks if task in done and not task.cancelled()
+                    and (row := task.result()) is not None]
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks,return_exceptions=True)
 
     async def _quoted_message(self, event, payload):
         """Fetch only the explicitly quoted native message, never general history."""
@@ -547,7 +602,7 @@ class AzusaOneBot(Star):
                 return None
             text=''.join(s['data'].get('text','') for s in segments
                          if s.get('type')=='text' and isinstance(s['data'].get('text'),str))
-            if len(text)>6000:return None
+            if len(text)>6000 or hidden_message(text):return None
             timestamp=row.get('time')
             if type(timestamp) is not int or timestamp<0:return None
             return {'message_id':ref,'user_id':author,'kind':payload['kind'],'scope_id':payload['scope_id'],
@@ -637,7 +692,9 @@ class AzusaOneBot(Star):
         # The selected adapter belongs exclusively to this bridge, even disabled.
         event.should_call_llm(False)
         event.stop_event()
-        reply_id, ack_status, delivered_message_id = None, "uncertain", None
+        reply_id, ack_status, delivered_message_id = None, "cancelled", None
+        ack_error = 'send_not_attempted'
+        claim_token = None
         segmented = False
         try:
             policy = self._policy()
@@ -646,9 +703,12 @@ class AzusaOneBot(Star):
             payload = self._payload(event, policy)
             if payload is None:
                 return
-            quoted = await self._quoted_message(event,payload)
+            quoted, mentioned_members = await asyncio.gather(
+                self._quoted_message(event,payload), self._mentioned_members(event,payload))
             if quoted is not None:
                 payload['quoted_message'] = quoted
+            if mentioned_members:
+                payload['mentioned_members'] = mentioned_members
             base = self._endpoint()
             headers = {"Authorization": "Bearer " + self._token()}
             response = await self.client.post(base + "/bridge/message", json=payload, headers=headers)
@@ -677,6 +737,7 @@ class AzusaOneBot(Star):
                     if (not current["enabled"] or current["self_id"] != payload["app_id"]
                         or not self._scope_allowed(current, payload["kind"], payload["scope_id"])
                         or (payload["unprompted"] and payload["scope_id"] not in current.get("chat_groups",()))):
+                        ack_error='bridge_policy_changed'
                         return
                     # Pinned AstrBot helper encodes local WAV/image data as base64.
                     # NapCat performs its own audio conversion. Keep the API receipt,
@@ -687,17 +748,21 @@ class AzusaOneBot(Star):
                     # A global role switch can occur during generation or media
                     # conversion. Authorize the pinned role immediately before send.
                     authorization = await self.client.post(base + "/bridge/reply/authorize",
-                        headers=headers, json={"reply_id": reply_id}, timeout=10)
+                        headers={**headers, "X-XZBot-Claim-Receipts": "1"}, json={"reply_id": reply_id}, timeout=10)
                     authorization.raise_for_status()
                     allowed = authorization.json()
                     if not isinstance(allowed, dict) or allowed.get("allowed") is not True:
+                        ack_error='send_authorization_denied'
                         return
+                    claim_token = allowed.get("claim_token")
                     current = self._policy()
                     if (not current["enabled"] or current["self_id"] != payload["app_id"]
                         or not self._scope_allowed(current, payload["kind"], payload["scope_id"])
                         or (payload["unprompted"] and payload["scope_id"] not in current.get("chat_groups",()))):
+                        ack_error='bridge_policy_changed'
                         return
                     route = {"self_id": int(payload["app_id"]), "message": outgoing}
+                    ack_status='uncertain'
                     if payload["kind"] == "group":
                         receipt = await event.bot.send_group_msg(group_id=int(payload["scope_id"]), **route)
                     else:
@@ -706,10 +771,12 @@ class AzusaOneBot(Star):
                         raise ValueError("OneBot delivery receipt unavailable")
                     delivered_message_id = message_id(receipt.get("message_id"))
                 ack_status = "sent"
+                ack_error=''
         except Exception as error:
             # Never log request/response bodies, member IDs, tokens, or exceptions.
             # A timeout/missing receipt must not trigger a retry or text fallback.
-            logger.warning("XZBot OneBot delivery unconfirmed: %s", classify_send_error(error))
+            ack_error=classify_send_error(error) if ack_status=="uncertain" else "send_not_attempted"
+            logger.warning("XZBot OneBot delivery unconfirmed: %s", ack_error)
         finally:
             if reply_id:
                 try:
@@ -718,6 +785,9 @@ class AzusaOneBot(Star):
                                                           json={"reply_id":reply_id}, timeout=10)
                     else:
                         acknowledgement = {"reply_id": reply_id, "status": ack_status}
+                        if claim_token:
+                            acknowledgement["claim_token"] = claim_token
+                        if ack_error:acknowledgement['error_code']=ack_error
                         if ack_status == "sent" and delivered_message_id is not None:
                             acknowledgement["message_id"] = delivered_message_id
                         response = await self.client.post(base + "/bridge/ack", headers=headers,

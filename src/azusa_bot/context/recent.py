@@ -26,6 +26,8 @@ def assessment(rows, current_time):
                        'time_basis': 'observed_at' if kind == 'bilibili_live' else 'published_at',
                        'time': datetime.fromtimestamp(stamp, CST).isoformat(timespec='seconds'),
                        'age_seconds': int(now-stamp),
+                       'temporal_role': 'past_observation' if kind == 'bilibili_live' else 'published_event',
+                       'proves_current_activity': False,
                        'content_event_time': 'state_observation' if kind == 'bilibili_live' else 'not_inferred'})
     return {'evaluated_at': current_time, 'window_hours': 24,
             'status': 'recent_records_available' if events else 'no_recent_records',

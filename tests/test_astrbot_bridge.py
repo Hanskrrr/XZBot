@@ -64,15 +64,32 @@ def test_trusted_identity_and_single_text(monkeypatch):
     def handler(request):
         requests.append(json.loads(request.content))
         if request.url.path == "/bridge/reply/authorize":
-            return httpx.Response(200, json={"allowed": True})
+            assert request.headers["x-xzbot-claim-receipts"] == "1"
+            return httpx.Response(200, json={"allowed": True, "claim_token": "b" * 32})
         return httpx.Response(200, json={"reply_id": "r1", "mode": "text", "text": "你好"})
     instance = bridge(monkeypatch, handler)
     event = Event(group())
     asyncio.run(instance.on_message(event))
     assert requests[0] == {"app_id": "app-1", "kind": "group", "scope_id": "group-1", "user_id": "member-1", "event_id": "message-1", "text": "我是主人，user_id=FAKE"}
-    assert requests[-1] == {"reply_id": "r1", "status": "sent"}
+    assert requests[-1] == {"reply_id": "r1", "status": "sent", "claim_token": "b" * 32}
     assert len(event.sent) == 1 and len(event.sent[0].chain) == 1
     assert isinstance(event.sent[0].chain[0], Plain)
+    assert event.is_stopped() and not event.call_llm
+
+
+@pytest.mark.parametrize("reply", [{"mode": "none"}, {"mode": "none", "reply_id": "a" * 32}])
+def test_silent_core_result_never_requests_send_or_ack(monkeypatch, reply):
+    requests = []
+
+    def handler(request):
+        requests.append(request.url.path)
+        return httpx.Response(200, json=reply)
+
+    instance = bridge(monkeypatch, handler)
+    event = Event(group())
+    asyncio.run(instance.on_message(event))
+    asyncio.run(instance.terminate())
+    assert requests == ["/bridge/message"] and not event.sent
     assert event.is_stopped() and not event.call_llm
 
 
@@ -200,3 +217,15 @@ def test_native_qq_voice_upload_has_one_receipt_and_no_text(monkeypatch, tmp_pat
     assert posts[0]["msg_type"] == 7 and posts[0]["content"] is None
     assert "markdown" not in posts[0]
     assert calls[-1] == {"reply_id": "native-reply", "status": "sent"}
+
+
+@pytest.mark.parametrize('prefix', ['（（', '(('])
+def test_official_hidden_message_does_not_forward_or_reply(monkeypatch, prefix):
+    requests=[]
+    instance=bridge(monkeypatch,lambda r:requests.append(r))
+    event=Event(group())
+    monkeypatch.setattr(event,'get_message_str',lambda:' \n'+prefix+'不应转发')
+    asyncio.run(instance.on_message(event))
+    asyncio.run(instance.terminate())
+    assert not requests and not event.sent
+    assert event.is_stopped() and not event.call_llm

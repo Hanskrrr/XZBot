@@ -326,22 +326,43 @@ class ProfileEngineManager:
                 raise ProfileError("profile_busy")
             return self.profiles.delete(profile_id)
 
-    def authorize_reply(self,reply_id):
+    def authorize_reply(self, reply_id):
+        """Check eligibility without claiming an individual send."""
+        with self._guard, self._active.ledger.db() as db:
+            return self._reply_eligible(db, reply_id)
+
+    def claim_reply(self, reply_id, *, token_required=False):
+        with self._guard, self._active.ledger.db() as db:
+            if not self._reply_eligible(db, reply_id):
+                return None
+            claim_token = uuid.uuid4().hex if token_required else ""
+            changed = db.execute(
+                "UPDATE deliveries SET status='authorized',claim_token=? "
+                "WHERE reply_id=? AND status='prepared' AND NOT EXISTS "
+                "(SELECT 1 FROM delivery_segments WHERE reply_id=deliveries.reply_id)",
+                (claim_token, reply_id))
+            return claim_token if changed.rowcount else None
+
+    def _reply_eligible(self, db, reply_id):
         if not activity_allowed(self.root):
             return False
-        with self._guard, self._active.ledger.db() as db:
-            row=db.execute("SELECT status,profile_id,profile_epoch,at,asset_reference FROM deliveries WHERE reply_id=?",(reply_id,)).fetchone()
-            valid = bool(row and row["status"]=="prepared" and row["profile_id"]==self.active_profile_id
-                        and row["profile_epoch"]==self._epoch and time.time()-row["at"]<240)
-            if not valid:
+        row = db.execute(
+            "SELECT status,profile_id,profile_epoch,at,asset_reference,peer_bot,group_target "
+            "FROM deliveries WHERE reply_id=?", (reply_id,)).fetchone()
+        if not (row and row["status"] == "prepared" and row["profile_id"] == self.active_profile_id
+                and row["profile_epoch"] == self._epoch and time.time() - row["at"] < 240):
+            return False
+        if row["peer_bot"] and not self._active.peer_reply_current(reply_id):
+            return False
+        if row["group_target"] and not self._active.target_reply_current(reply_id):
+            return False
+        if row["asset_reference"] and row["asset_reference"] != "null":
+            from .assets import still_approved
+            try:
+                return still_approved(self._active.content_root, json.loads(row["asset_reference"]))
+            except (ValueError, TypeError):
                 return False
-            if row["asset_reference"] and row["asset_reference"] != "null":
-                from .assets import still_approved
-                try:
-                    return still_approved(self._active.content_root,json.loads(row["asset_reference"]))
-                except (ValueError,TypeError):
-                    return False
-            return True
+        return True
 
     async def handle(self,event,*,demo=False):
         if self._pinned.get() is not None:

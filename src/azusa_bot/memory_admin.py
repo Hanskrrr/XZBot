@@ -1,5 +1,6 @@
 """Authenticated local administration of the active profile's memory pipeline."""
 from __future__ import annotations
+import time
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
@@ -15,6 +16,16 @@ class ConsentInput(MemberInput):
     enabled: StrictBool
 
 
+class SummaryInput(MemberInput):
+    revisit: StrictBool = False
+
+
+class BackgroundInput(MemberInput):
+    text: str = Field(min_length=1,max_length=700)
+    version: int = Field(default=0,ge=0,strict=True)
+    profile_id: str | None = Field(default=None,pattern=r'^(default|[a-f0-9]{32})$')
+
+
 class GroupCollectionInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     scope: str = Field(min_length=1, max_length=512)
@@ -24,6 +35,50 @@ class GroupCollectionInput(BaseModel):
 def create_router(engine) -> APIRouter:
     """Caller must mount with its local-admin authentication dependency."""
     router = APIRouter(prefix="/admin/memory")
+
+    def member_view(current,scope,user):
+        from .member_notes import view
+        from .bot_control import read_control
+        result=view(current.memory,scope,user)
+        settings=current.settings(scope)
+        policy=current.memory.summary_policy(scope)
+        threshold=policy.get('auto_summary_every',settings.auto_summary_every)
+        wait=policy.get('auto_summary_max_wait_minutes',settings.auto_summary_max_wait_minutes)
+        prefix,identity,groups,friends=(('onebot',settings.onebot_self_id,settings.onebot_allowed_groups,settings.onebot_allowed_dm_users)
+            if settings.transport=='onebot' else ('qq',settings.app_id,settings.allowed_groups,settings.allowed_dm_users))
+        scope_allowed=(scope in {f'{prefix}:{identity}:group:{group}' for group in groups}
+                       or scope==f'{prefix}:{identity}:dm:{user}' and user in friends)
+        with current.memory._lock:
+            state=current.memory._db.execute('SELECT * FROM summary_progress WHERE scope=? AND user_id=?',(scope,user)).fetchone()
+            state=dict(state) if state else {}
+            pending,oldest=current.memory._db.execute("SELECT COUNT(*),MIN(created_at) FROM history WHERE scope=? AND user_id=? AND role='user' AND id>?",
+                (scope,user,state.get('through_id',0))).fetchone()
+        result['schedule']={'poll_seconds':60,'threshold':threshold,'max_wait_minutes':wait,
+            'enabled':current.memory.consent(scope,user) and not current.groups.opted_out(scope,user),
+            'bot_running':read_control(current.root)['enabled'] and (settings.onebot_enabled if settings.transport=='onebot' else settings.qq_enabled),
+            'scope_allowed':scope_allowed,'pending':pending,
+            'ready':pending>=threshold or bool(oldest and time.time()-oldest>=wait*60),
+            'last_attempt_at':state.get('last_attempt_at'),'last_success_at':state.get('last_success_at'),
+            'last_status':state.get('last_status','not_started'),'retry_at':state.get('retry_at',0)}
+        return dict(result,profile_id=current.profile_id)
+
+    @router.get('/member-context')
+    def member_context(scope: str = Query(min_length=1,max_length=512), user: str = Query(min_length=1,max_length=160)):
+        current=engine.current
+        return member_view(current,scope,user)
+
+    @router.put('/member-background')
+    def member_background(item: BackgroundInput):
+        from .member_notes import edit_background,view
+        current=engine.current
+        if item.profile_id is not None and item.profile_id!=current.profile_id:
+            raise HTTPException(409,'member_profile_changed')
+        try:
+            edit_background(current.memory,item.scope,item.user,item.text,version=item.version)
+        except ValueError as exc:
+            raise HTTPException(409 if str(exc)=='member_background_changed' else 400,str(exc)) from None
+        current.clear_group_context(item.scope,reason='memory_changed')
+        return member_view(current,item.scope,item.user)
 
     @router.get("/status")
     def status(scope: str | None = Query(default=None,min_length=1,max_length=512)):
@@ -106,13 +161,13 @@ def create_router(engine) -> APIRouter:
         return {"saved": True, "enabled": item.enabled, "profile_id": current.profile_id}
 
     @router.post("/summarize")
-    async def summarize(item: MemberInput):
+    async def summarize(item: SummaryInput):
         # Pin before the first await. The engine rechecks profile activation and
         # the store rechecks consent/evidence before committing the result.
         current = engine.current
         settings = current.settings()
         async with current._capacity:
-            result = await current.summarize(item.scope, item.user, None, settings, force=True)
+            result = await current.summarize(item.scope, item.user, None, settings, force=True,revisit=item.revisit)
         return {**result, "profile_id": current.profile_id}
 
     return router

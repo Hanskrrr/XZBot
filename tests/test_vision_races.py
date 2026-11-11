@@ -10,6 +10,7 @@ from context_helpers import context as wire_context
 
 from azusa_bot.prompts import DEFAULTS
 from azusa_bot.core import Engine, Incoming
+from azusa_bot.providers import mock_group_plan
 from azusa_bot.settings import Settings, private_write, write_settings
 from azusa_bot.vision import VisionCache
 
@@ -27,11 +28,16 @@ def pixels():
 class Provider:
     def __init__(self):
         self.calls = []
+        self.plan_calls = []
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self.block_first = False
 
     async def complete(self, messages, **kwargs):
+        data=wire_context(messages)
+        if data.get('task')=='group_plan':
+            self.plan_calls.append(messages)
+            return mock_group_plan(data)
         self.calls.append(messages)
         if self.block_first and len(self.calls) == 1:
             self.entered.set()
@@ -100,7 +106,7 @@ async def test_privacy_withdrawal_preempts_named_reply_in_progress(rig):
     assert "已删除" in forgotten["text"]
     provider.release.set()
     result = await first
-    assert result["mode"] == "none" and result["reason"] == "context_changed_during_generation"
+    assert result["mode"] == "none" and result["reason"] == "privacy_context_changed"
     assert engine.vision.select(SCOPE, ["1"]) == []
     assert engine.trajectories.list(user="20001")["items"] == []
 
@@ -115,8 +121,9 @@ async def test_busy_group_preserves_context_without_bypassing_paid_decision_inte
     await asyncio.sleep(0)
     provider.release.set()
     old, fresh = await asyncio.gather(first, second)
-    assert old["reason"] == "context_changed_during_generation" and old["mode"] == "none"
+    assert old['mode']=='text' and engine.target_reply_current(old['reply_id'])
     assert fresh["reason"] == "decision_cooldown" and len(provider.calls) == 1
+    assert len(provider.plan_calls)==1
     assert [row["message_id"] for row in engine.groups.snapshot(SCOPE)] == ["1", "2"]
 
 

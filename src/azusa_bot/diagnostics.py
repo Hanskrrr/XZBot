@@ -3,8 +3,9 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 import re,sqlite3,time
+from .delivery_errors import CONVERSATION_CODES, delivery_explanation
 
-_CODES = {'output_contract_invalid','ok','unknown','internal_failure','credential_store_unavailable','deepseek_not_configured',
+_CODES = {'activity_state_conflict','output_contract_invalid','ok','unknown','internal_failure','credential_store_unavailable','deepseek_not_configured',
  'model_not_configured','deepseek_incomplete','deepseek_network_or_format','invalid_reply_object',
  'empty_reply','fish_not_configured','fish_audio_too_large','fish_invalid_wav','fish_network_or_storage',
  'voice_budget_exhausted','cloud_budget','summary_invalid','provider_unknown_error',
@@ -13,6 +14,7 @@ _CODES = {'output_contract_invalid','ok','unknown','internal_failure','credentia
  'privacy_context_changed','context_retry_budget','web_search_query_invalid','web_search_query_private',
  'web_search_response_too_large','web_search_unavailable','web_search_mock_disabled','web_search_budget',
  'web_search_credentials_unavailable','execution_budget_exhausted','execution_timeout'}
+_CODES |= CONVERSATION_CODES
 
 CANCELLATION_REASONS = {
     'group_settings_changed':'这个群的参与设置已更新，旧回复已取消。',
@@ -38,6 +40,8 @@ def safe_code(value) -> str:
 
 
 def explanation(code):
+    if code in CONVERSATION_CODES:return delivery_explanation(code)
+    if code=='activity_state_conflict':return '候选回答与直播状态矛盾或缺乏“刚刚”的时间依据，已拦截；仅在剩余调用额度允许时重新生成一次。'
     if code=='output_contract_invalid':return '模型返回缺失或无效的接话控制字段；本次没有通过输出校验。具体字段与本群生效设置见调用轨迹。'
     if code=='ok':return '最近一次调用成功。'
     if code=='unknown':return '尚无调用结果。'

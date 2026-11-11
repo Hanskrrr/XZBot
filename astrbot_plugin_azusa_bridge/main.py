@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 
 import httpx
 from azusa_bot.bot_control import activity_allowed
+from azusa_bot.message_privacy import hidden_message
 from botpy.message import C2CMessage, GroupMessage
 
 from astrbot.api import AstrBotConfig, logger
@@ -132,12 +133,14 @@ class AzusaBridge(Star):
         event.stop_event()
         if not self.config.get("enabled", False):
             return
-        reply_id = None
-        ack_status = "uncertain"
+        reply_id, claim_token = None, None
+        ack_status = "cancelled"
         try:
             base = self._endpoint()
             headers = {"Authorization": "Bearer " + self._token()}
             payload = self._payload(event)
+            if hidden_message(payload["text"]):
+                return
             if not self._power_allowed():
                 return
             if not payload["text"].strip():
@@ -145,29 +148,35 @@ class AzusaBridge(Star):
             response = await self.client.post(base + "/bridge/message", json=payload, headers=headers)
             response.raise_for_status()
             reply = response.json()
+            if not isinstance(reply, dict):
+                raise ValueError("Invalid core reply")
+            if reply.get("mode") == "none":
+                return
             reply_id = reply.get("reply_id")
             if not isinstance(reply_id, str) or not reply_id:
                 raise ValueError("Missing reply identity")
             message = self._message(reply)
-            if message is not None:
-                authorization = await self.client.post(base + "/bridge/reply/authorize",
-                    headers=headers, json={"reply_id": reply_id}, timeout=10)
-                authorization.raise_for_status()
-                allowed = authorization.json()
-                if not isinstance(allowed, dict) or allowed.get("allowed") is not True:
-                    return
-                if not self._power_allowed():
-                    return
-                # One bridge send only. QQ's upstream adapter has internal retries;
-                # a timeout must never trigger a second text/voice fallback here.
-                # AstrBot 4.29.4's public send() discards the QQ receipt and may
-                # return normally after a swallowed conversion/upload failure.
-                # Use the same pinned adapter pipeline while retaining receipt.
-                event.send_buffer = message
-                receipt = await event._post_send()
-                receipt_id = receipt.get("id") if isinstance(receipt, dict) else getattr(receipt, "id", None)
-                if not receipt_id:
-                    raise ValueError("QQ delivery receipt unavailable")
+            authorization = await self.client.post(base + "/bridge/reply/authorize",
+                headers={**headers, "X-XZBot-Claim-Receipts": "1"}, json={"reply_id": reply_id}, timeout=10)
+            authorization.raise_for_status()
+            allowed = authorization.json()
+            if not isinstance(allowed, dict) or allowed.get("allowed") is not True:
+                reply_id = None
+                return
+            claim_token = allowed.get("claim_token")
+            if not self._power_allowed():
+                return
+            # One bridge send only. QQ's upstream adapter has internal retries;
+            # a timeout must never trigger a second text/voice fallback here.
+            # AstrBot 4.29.4's public send() discards the QQ receipt and may
+            # return normally after a swallowed conversion/upload failure.
+            # Use the same pinned adapter pipeline while retaining receipt.
+            event.send_buffer = message
+            ack_status = "uncertain"
+            receipt = await event._post_send()
+            receipt_id = receipt.get("id") if isinstance(receipt, dict) else getattr(receipt, "id", None)
+            if not receipt_id:
+                raise ValueError("QQ delivery receipt unavailable")
             ack_status = "sent"
         except Exception:
             # Deliberately omit exception text, request bodies and response bodies.
@@ -175,11 +184,10 @@ class AzusaBridge(Star):
         finally:
             if reply_id:
                 try:
-                    ack = await self.client.post(
-                        base + "/bridge/ack",
-                        headers=headers,
-                        json={"reply_id": reply_id, "status": ack_status},
-                    )
+                    receipt = {"reply_id": reply_id, "status": ack_status}
+                    if claim_token:
+                        receipt["claim_token"] = claim_token
+                    ack = await self.client.post(base + "/bridge/ack", headers=headers, json=receipt)
                     ack.raise_for_status()
                 except Exception:
                     logger.warning("XZBot delivery acknowledgement unavailable")

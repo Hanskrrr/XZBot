@@ -20,6 +20,7 @@ async def test_confirmed_voice_followup_survives_new_group_message_with_or_witho
     with engine.groups.db() as db:
         db.execute("UPDATE group_activity SET at=?", (time.time()-10,))
         db.execute("UPDATE group_replies SET at=?", (time.time()-10,))
+    engine._name_decisions[SCOPE]=time.monotonic()-10
 
     provider.answer.update(mode="voice", text="晚安，祝你做个好梦。")
     provider.entered, provider.release = asyncio.Event(), asyncio.Event()
@@ -45,7 +46,7 @@ async def test_confirmed_voice_followup_survives_new_group_message_with_or_witho
     assert len(provider.speech) == 1
     assert len(provider.calls) == 2
     tts = traces(engine, "tts")
-    assert len(tts) == 1 and tts[0]["trigger"] == "followup"
+    assert len(tts) == 1 and tts[0]["trigger"] == ('direct' if named else 'followup')
     assert result["mode"] == "voice" and Path(result["media_path"]).is_file()
     assert tts[0]["status"] == "success"
 

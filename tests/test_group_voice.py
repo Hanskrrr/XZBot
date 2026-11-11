@@ -13,7 +13,8 @@ import wave
 import pytest
 
 from azusa_bot.core import Engine, Incoming
-from azusa_bot.providers import ProviderError
+from azusa_bot.providers import ProviderError, mock_group_plan
+from context_helpers import context as wire_context
 from azusa_bot.settings import Settings, private_write, write_settings
 
 
@@ -26,6 +27,8 @@ class Provider:
     def __init__(self, root):
         self.root = root
         self.calls, self.speech = [], []
+        self.plan_calls = []
+        self.plan_answer = None
         self.answer = {"participate": True, "continuation": True, "confidence": .95,
                        "mode": "voice", "text": "在呢，今天也要早点休息。"}
         self.error = None
@@ -33,8 +36,20 @@ class Provider:
         self.generated = []
 
     async def complete(self, messages, **kwargs):
+        data=wire_context(messages)
+        if data.get('task')=='group_plan':
+            self.plan_calls.append(messages)
+            if self.plan_answer is not None:
+                return self.plan_answer(data) if callable(self.plan_answer) else self.plan_answer
+            result=mock_group_plan(data)
+            for key in ('confidence','votes'):
+                if key in self.answer:result[key]=self.answer[key]
+            if self.answer.get('participate') is False:
+                result['participation_plan'].update(action='observe',reason='synthetic_silence')
+            return result
         self.calls.append(messages)
-        return {"memories": []} if kwargs.get("summary") else dict(self.answer)
+        return ({"memories": []} if kwargs.get("summary") else
+                {key:value for key,value in self.answer.items() if key not in {'participate','continuation','confidence','votes'}})
 
     async def synthesize(self, text):
         self.speech.append(text)
@@ -87,11 +102,12 @@ async def test_named_without_mention_synthesizes_once_and_audits_origin(rig):
     assert provider.speech == [provider.answer["text"]]
     assert Path(reply["media_path"]).is_file()
     assert "语音已发送" not in reply["text"]
-    tts, decision = traces(engine, "tts"), traces(engine, "group_decision")
+    tts, decision = traces(engine, "tts"), traces(engine, "reply")
     assert len(tts) == len(decision) == 1
     assert tts[0]["scope"] == SCOPE and tts[0]["user"] == "20001"
     assert tts[0]["related_id"] == decision[0]["id"]
-    assert tts[0]["trigger"] == "group_observation"
+    assert tts[0]["trigger"] == "direct"
+    assert provider.plan_calls==[]  # An unambiguous own vocative resolves locally.
     assert tts[0]["provider_called"] and tts[0]["status"] == "success"
     # Preparing speech does not invent a send or prematurely open a dialogue.
     assert not engine._group_threads
@@ -127,7 +143,7 @@ async def test_voice_is_not_synthesized_without_participation_mode_and_permissio
     elif choice == "voice_disabled": settings.voice_enabled = False
     elif choice == "not_authorized": settings.voice_authorized = False
     write_settings(engine.root, settings)
-    reply = await engine.handle(event())
+    reply = await engine.handle(event('大家要不要语音道个晚安？' if choice in {'silence','low_confidence'} else '阿梓，发语音说声晚安'))
     assert provider.speech == []
     assert reply["mode"] == ("none" if choice in {"silence", "low_confidence"} else "text")
     assert traces(engine, "tts") == []

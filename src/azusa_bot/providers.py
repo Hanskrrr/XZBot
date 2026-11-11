@@ -14,6 +14,9 @@ from .provider_usage import CompletionResult, safe_usage
 from .runtime_layout import runtime_layout
 
 
+SUMMARY_OUTPUT_TOKENS = 3200
+_JSON_FENCE = re.compile(r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n```", re.IGNORECASE | re.DOTALL)
+
 class ProviderError(RuntimeError):
     """Only fixed, safe codes may cross provider boundary."""
 
@@ -75,7 +78,7 @@ class CloudProviders:
         if not self.model:
             raise ProviderError("model_not_configured")
         body = {"model": self.model, "messages": messages, "stream": False,
-                "max_tokens": 700 if summary else 1200, "response_format": {"type": "json_object"}}
+                "max_tokens": SUMMARY_OUTPUT_TOKENS if summary else 1200, "response_format": {"type": "json_object"}}
         if self.protocol == "deepseek":
             body["thinking"] = {"type": "disabled"}
         usage = {}
@@ -106,10 +109,13 @@ class CloudProviders:
                 message = choice.get("message")
                 if not isinstance(message, dict) or not isinstance(message.get("content"), str):
                     raise ProviderError(prefix + "_response_shape_invalid")
-                if not message["content"].strip():
+                content = message["content"].removeprefix("\ufeff").strip(" \t\r\n")
+                if not content.strip():
                     raise ProviderError(prefix + "_empty_content")
+                if fence := _JSON_FENCE.fullmatch(content):
+                    content = fence[1]
                 try:
-                    result = json.loads(message["content"])
+                    result = json.loads(content)
                 except ValueError:
                     raise ProviderError(prefix + "_output_not_json") from None
                 if not isinstance(result, dict):
@@ -170,10 +176,74 @@ class CloudProviders:
             raise ProviderError("fish_network_or_storage") from None
 
 
+def mock_request_context(messages):
+    """Read application JSON envelopes for the offline provider only."""
+    data = {}
+    for message in messages:
+        if message.get('role') != 'user':
+            continue
+        content = message.get('content')
+        blocks = [{'type':'text','text':content}] if isinstance(content,str) else content if isinstance(content,list) else []
+        for block in blocks:
+            if block.get('type') != 'text' or not isinstance(block.get('text'),str):
+                continue
+            try:
+                value = json.loads(block['text'].split('\n',1)[1])
+            except (ValueError,IndexError):
+                continue
+            if isinstance(value,dict):
+                data.update(value)
+    return data
+
+
+def mock_group_plan(data):
+    """Deterministic rehearsal, not a semantic model or a source of identities."""
+    current = data.get('current_message', {})
+    relation = data.get('local_relation', {})
+    number, self_id = current.get('message_id'), data.get('self_id')
+    target = relation.get('target', 'unknown')
+    identities = list(relation.get('addressee_ids', []))
+    evidence = list(relation.get('evidence_message_ids', []))
+    anchor = relation.get('thread_anchor') or number
+    facts = relation.get('facts', {})
+    native = facts.get('mentioned_user_ids', [])
+    quoted = facts.get('quoted_author_id')
+    recent = data.get('recent_conversation', data.get('recent_group_messages', []))
+    visible = {row.get('message_id'):row for row in recent if isinstance(row,dict)}
+    if not quoted and current.get('reply_to_id') in visible:
+        quoted = visible[current['reply_to_id']].get('user_id')
+    if anchor != number and anchor not in evidence:
+        if anchor in visible:
+            evidence.append(anchor)
+        else:
+            anchor = number
+    if target == 'unknown':
+        if native:
+            identities = list(native)
+            target = 'self' if identities == [self_id] and quoted in (None,self_id) else 'others'
+            if target == 'others' and self_id in identities:
+                target, identities = 'unknown', []
+        elif quoted:
+            target, identities = ('self' if quoted == self_id else 'others'), [quoted]
+        elif not re.search(r'[你您妳]', current.get('text', '')):
+            target = 'group'
+    if isinstance(number,str) and number not in evidence:
+        evidence.append(number)
+    return {'confidence':.95, 'votes':{key:.95 for key in ('relevance','understanding','contribution','timing')}, 'participation_plan': {
+        'action':'reply' if target in {'self','group'} else 'observe', 'target':target,
+        'addressee_ids':identities, 'response_to_message_id':number or '',
+        'thread_anchor':anchor or '', 'evidence_message_ids':evidence,
+        'reason':'mock_local_evidence',
+    }}
+
+
 class MockProviders:
     async def complete(self, messages: list[dict], *, summary: bool = False) -> dict:
         if summary:
             return {"memories": []}
+        context = mock_request_context(messages)
+        if context.get('task') == 'group_plan':
+            return mock_group_plan(context)
         query = messages[-1]["content"]
         if isinstance(query,list):
             query = " ".join(block.get("text","") for block in query if block.get("type")=="text")

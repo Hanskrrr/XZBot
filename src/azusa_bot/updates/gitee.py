@@ -22,7 +22,9 @@ def redirect_allowed(url):
     host = p.hostname or ''
     return (p.scheme == 'https' and not p.username and not p.password
             and not p.fragment and p.port in (None, 443)
-            and (host == 'gitee.com' or host == 'giteeusercontent.com'
+            # Release attachments redirect to Gitee's foruda download host.
+            # Trust this exact host, not arbitrary gitee.com subdomains.
+            and (host in {'gitee.com', 'foruda.gitee.com', 'giteeusercontent.com'}
                  or host.endswith('.giteeusercontent.com')))
 
 
